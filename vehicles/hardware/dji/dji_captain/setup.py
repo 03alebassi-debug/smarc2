@@ -12,6 +12,8 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', glob('launch/*.launch*')),
+        ('share/' + package_name + '/models/M350/continuous_model', glob('models/M350/continuous_model/*')),
+        ('share/' + package_name + '/models/M350/discrete_model', glob('models/M350/discrete_model/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
