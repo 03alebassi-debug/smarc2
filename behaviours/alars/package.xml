@@ -8,6 +8,9 @@
   <license>MIT</license>
 
 
+  <exec_depend>sway_controller</exec_depend>
+  <exec_depend>dji_captain</exec_depend>
+
   <test_depend>python3-pytest</test_depend>
 
   <export>
