@@ -202,6 +202,18 @@ col(
 )"
 
 ############
+# 2b Move to dumped
+############
+ALARS_MOVE_TO_DUMPED_CMD="ros2 launch alars alars_move_to_dumped_server_launch.py \
+robot_name:=$ROBOT_NAME \
+use_sim_time:=$USE_SIM_TIME"
+
+tmux_make_layout "$SESSION" MoveToDumped "
+row(
+    var(ALARS_MOVE_TO_DUMPED_CMD)
+)"
+
+############
 # 3 BTs
 ############
 WASP_BT_CMD="ros2 launch wasp_bt wasp_bt.launch \
