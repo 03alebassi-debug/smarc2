@@ -7,11 +7,12 @@ class PathParametrizer:
                  startingDronePosition: np.ndarray,
                  targetPosition: np.ndarray,
                  maxSpeed: float,
-                 maxAcceleration: float):
+                 maxAcceleration: float, 
+                 extraTime: float = 0):
 
         displacement = np.asarray(targetPosition, float) - np.asarray(startingDronePosition, float)
         self._p0 = np.asarray(startingDronePosition, float)
-        self._totalDistance = np.linalg.norm(displacement)          
+        self._totalDistance = np.linalg.norm(displacement)
 
         if self._totalDistance < 1e-9:
             self._missionTime = 0.0
@@ -20,12 +21,12 @@ class PathParametrizer:
             self._v_fn = lambda t: 0.0
             return
 
-        self._dir = displacement / self._totalDistance              
+        self._dir = displacement / self._totalDistance
 
         self._missionTime = max(
             1.875 * self._totalDistance / maxSpeed,
             np.sqrt(5.7735 * self._totalDistance / maxAcceleration),
-        )
+        ) + self._totalDistance
 
         t = sp.Symbol('t')
         tau = t / self._missionTime                                

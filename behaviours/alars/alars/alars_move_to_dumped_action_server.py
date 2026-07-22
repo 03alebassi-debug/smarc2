@@ -8,7 +8,7 @@ from rclpy.qos       import QoSProfile, ReliabilityPolicy, QoSDurabilityPolicy
 from rcl_interfaces.msg import ParameterDescriptor, ParameterType
 
 from geographic_msgs.msg import GeoPoint
-from geometry_msgs.msg   import PoseStamped, TwistStamped
+from geometry_msgs.msg   import PoseStamped, TwistStamped, Vector3Stamped
 
 
 from smarc_action_base.gentler_action_server import GentlerActionServer
@@ -185,7 +185,7 @@ class MoveToDumpedAction():
             drone_pose = self._drone_state._drone_in_map.pose.position
             drone_position = np.asarray([drone_pose.x, drone_pose.y], float)
             target_position = np.array([pos.x, pos.y], float)
-            self._path_parametrizer = PathParametrizer(drone_position, target_position, 
+            self._path_parametrizer = PathParametrizer(drone_position, target_position,
                                                          self._max_speed, self._max_acceleration)
             
             self.zvd = ZVD(self.rope_length, self.xi)
@@ -255,34 +255,63 @@ class MoveToDumpedAction():
         self.state_space = ct.ss(self.A, self.B, self.C, self.D)
 
     def _loop_inner(self) -> bool|None:
+        goal_in_base_flat_now = self._drone_state.pose_stamped_in_base_flat(self._goal_in_map)
+        if goal_in_base_flat_now is None:
+            self.log("Failed to transform goal into current base_flat frame, skipping this tick.")
+            return None
+
         goal_error = np.array([
-            self._goal_in_base_flat.pose.position.x,
-            self._goal_in_base_flat.pose.position.y
+            goal_in_base_flat_now.pose.position.x,
+            goal_in_base_flat_now.pose.position.y
         ])
         self._distance_from_goal = np.linalg.norm(goal_error)
 
         if self._distance_from_goal < self._goal_tolerance:
             self.log(f'Goal reaced withing tolerance {self._goal_tolerance}, return SUCCESS')
-            return True 
-        self.log(f'Distance remaining: {self._distance_from_goal:.2f}')
+            return True
+        #self.log(f'Distance remaining: {self._distance_from_goal:.2f}')
 
         now = self.now_time
         elapsed_time = now - self._start_mission_time
 
         if now > self._t_end:
             self._node.get_logger().error('Goal not reached within mission time, return FAILURE')
-            return False 
+            return False
 
         _, velocity_references = self.zvd.shapeReferences(self.Ai, self.Ti, self._path_parametrizer, elapsed_time)
+
+        time_remaining = self._path_parametrizer._missionTime - elapsed_time
+        self._node.get_logger().info(
+            f'[debug] t_remaining_in_plan: {time_remaining:.2f}s '
+            f'(elapsed: {elapsed_time:.2f}s / missionTime: {self._path_parametrizer._missionTime:.2f}s), '
+            f'v_map: [{velocity_references[0]:+.3f}, {velocity_references[1]:+.3f}]',
+            throttle_duration_sec=2.0
+        )
+
+        vel_in_map = Vector3Stamped()
+        vel_in_map.header.stamp = self.now_stamp
+        vel_in_map.header.frame_id = self._drone_state.MAP_FRAME
+        vel_in_map.vector.x = float(velocity_references[0])
+        vel_in_map.vector.y = float(velocity_references[1])
+
+        vel_in_base_flat = self._drone_state.vector_stamped_in_base_flat(vel_in_map)
+        if vel_in_base_flat is None:
+            self.log("Failed to transform velocity reference into base_flat frame, skipping this tick.")
+            return None
 
         setpoint = TwistStamped()
         setpoint.header.stamp = self.now_stamp
         setpoint.header.frame_id = self.BASE_FLAT_FRAME
-        setpoint.twist.linear.x = velocity_references[0]
-        setpoint.twist.linear.y = velocity_references[1]
+        setpoint.twist.linear.x = vel_in_base_flat.vector.x
+        setpoint.twist.linear.y = vel_in_base_flat.vector.y
         self.ref_publisher.publish(setpoint)
 
-        return None 
+        self._node.get_logger().info(
+            f'[debug] v_base_flat published: [{setpoint.twist.linear.x:+.3f}, {setpoint.twist.linear.y:+.3f}]',
+            throttle_duration_sec=2.0
+        )
+
+        return None
 
 def main(args=None):
     rclpy.init(args=args)
