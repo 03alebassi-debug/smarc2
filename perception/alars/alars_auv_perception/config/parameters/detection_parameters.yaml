@@ -24,7 +24,7 @@
       lw_ratio_margin: 4.0
 
     classes:
-      names: ["sam", "buoy", "lolo", "catamaran", "boat"]
+      names: ["sam", "buoy", "hook", "land_pad"]
 
     topics:
       rviz:

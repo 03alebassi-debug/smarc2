@@ -11,7 +11,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
     ],
-    install_requires=['setuptools', 'numpy', 'simpy'],
+    install_requires=['setuptools', 'numpy', 'simpy', 'PyYAML', 'control'],
     zip_safe=True,
     maintainer='aleba',
     maintainer_email='alebas@kth.se',
@@ -23,6 +23,10 @@ setup(
         ],
     },
     entry_points={
-        'console_scripts': [],
+        'console_scripts': [
+            'hook_kalman_filter_node = sway_controller.Kalman_Filter.hook_kalman_filter_node:main',
+            'hook_ground_truth_comparator_node = sway_controller.Kalman_Filter.hook_ground_truth_comparator_node:main',
+            'estimate_length_and_damping_node = sway_controller.Kalman_Filter.estimate_length_and_damping_node:main',
+        ],
     },
 )

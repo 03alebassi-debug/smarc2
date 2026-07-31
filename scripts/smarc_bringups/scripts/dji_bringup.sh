@@ -214,6 +214,22 @@ row(
 )"
 
 ############
+# 2c Hook pendulum length/damping identification
+############
+if [[ "$NO_CAM" == "True" ]]; then
+    ESTIMATE_LENGTH_AND_DAMPING_CMD="echo 'Camera disabled, not launching estimate_length_and_damping_node'"
+else
+    ESTIMATE_LENGTH_AND_DAMPING_CMD="ros2 run sway_controller estimate_length_and_damping_node --ros-args \
+    -p robot_name:=$ROBOT_NAME \
+    -p use_sim_time:=$USE_SIM_TIME"
+fi
+
+tmux_make_layout "$SESSION" EstimateLengthAndDamping "
+row(
+    var(ESTIMATE_LENGTH_AND_DAMPING_CMD)
+)"
+
+############
 # 3 BTs
 ############
 WASP_BT_CMD="ros2 launch wasp_bt wasp_bt.launch \
@@ -271,10 +287,12 @@ else
     if [[ $USE_SIM_TIME = "True" ]]; then
         YOLO_DEVICE=cpu
         CAM_CALIBRATION_FILE="sim_1080p_cam_params.yaml"
-        # seems to be doing better in sim
-        YOLO_MODEL="yolo_model_2cls_mixed.pt"
+        # 4-class model: sam, buoy, hook, land_pad
+        YOLO_MODEL="yolo_model_4cls_hook_sim.pt"
     fi
-    YOLO_CMD="ros2 launch alars_auv_perception alars_yolo_detector.launch.py \
+    # PYTHONNOUSERSITE=1 keeps this node's dedicated conda env (ros_yolo) from
+    # silently picking up packages installed in ~/.local/lib/python3.10/site-packages.
+    YOLO_CMD="PYTHONNOUSERSITE=1 ros2 launch alars_auv_perception alars_yolo_detector.launch.py \
     robot_name:=$ROBOT_NAME \
     device:=$YOLO_DEVICE \
     use_sim_time:=$USE_SIM_TIME \

@@ -1,0 +1,7 @@
+#request
+bool request
+
+#response 
+bool success
+float64 length 
+float64 dumping 
