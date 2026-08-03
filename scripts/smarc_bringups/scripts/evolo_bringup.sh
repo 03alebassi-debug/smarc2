@@ -1,5 +1,11 @@
 #! /bin/bash
 
+#Kill earler instance of dune if it was not closed
+echo "Kill previous dune process"
+pkill dune
+sleep 1
+echo "Starting bringup"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/tmux_layout.sh"
 
@@ -131,6 +137,9 @@ if [ "$MODE" == "REAL" ]; then
     JSON_TRANSLATOR=True
     UW_COM=True
 
+    #Backseat
+    DUNE_BACKSEAT_DRIVER=True #[True , False]
+
 fi
 
 if [ "$MODE" == "HITL" ]; then
@@ -153,7 +162,7 @@ tmux select-window -t $SESSION:0
 tmux send-keys "Remember to start the logging!" 
 
 # Controllers
-CONTROLLER_CMD="ros2 launch evolo_controllers evolo_controllers_launch.py closed_loop_p_gain:=2.0 closed_loop_i_gain:=0.0 closed_loop_d_gain:=0.75 max_steering_output:=40.0"
+CONTROLLER_CMD="ros2 launch evolo_controllers evolo_controllers_launch.py closed_loop_p_gain:=1.0 closed_loop_i_gain:=0.1 closed_loop_d_gain:=0.0 max_steering_output:=40.0 max_integral:=10.0"
 tmux_make_layout "$SESSION" Controllers "
 col(
     var(CONTROLLER_CMD)
@@ -172,20 +181,23 @@ col(
 MOVE_TO_ACTION_CMD="sleep 4; ros2 run evolo_move_to move_to_server --ros-args -r __ns:=/$ROBOT_NAME -p use_sim_time:=$USE_SIM_TIME"
 MOVE_PATH_ACTION_CMD="sleep 4; ros2 run evolo_move_path move_path_server_dubins_curves --ros-args -r __ns:=/$ROBOT_NAME -p use_sim_time:=$USE_SIM_TIME --params-file \$(ros2 pkg prefix evolo_move_path)/share/evolo_move_path/config/evolo_params.yaml"
 EXTERNAL_CTRL_ACTION_CMD="sleep 4; ros2 run evolo_external_control externalcontrol_server --ros-args -r __ns:=/$ROBOT_NAME -p use_sim_time:=$USE_SIM_TIME"
-EMERGENCY_ACTION_CMD="ros2 run evolo_emergency_action server --ros-args -r __ns:=/$ROBOT_NAME -p use_sim_time:=$USE_SIM_TIME"
 DEPLOY_ACTION_CMD="ros2 run evolo_deploy evolo_deploy_server --ros-args -r __ns:=/$ROBOT_NAME -p use_sim_time:=$USE_SIM_TIME"
 DEPLOY_AT_ACTION_CMD="ros2 run evolo_deploy_at evolo_deploy_at_server --ros-args -r __ns:=/$ROBOT_NAME -p use_sim_time:=$USE_SIM_TIME"
+SEARCH_AREA_ACTION_CMD="ros2 run search_areas search_area --ros-args -r __ns:=/evolo --params-file $(ros2 pkg prefix search_areas)/share/search_areas/config/search_area.yaml"
+SEARCH_AREAS_ACTION_CMD="ros2 run search_areas search_areas --ros-args -r __ns:=/evolo"
+
 tmux_make_layout "$SESSION" Actions "
 col(
     row(
         var(MOVE_TO_ACTION_CMD),
         var(MOVE_PATH_ACTION_CMD),
-        var(DEPLOY_ACTION_CMD)
+        var(SEARCH_AREA_ACTION_CMD),
+        var(SEARCH_AREAS_ACTION_CMD)
     ),
     row(
         var(EXTERNAL_CTRL_ACTION_CMD),
-        var(EMERGENCY_ACTION_CMD),
-        var(DEPLOY_AT_ACTION_CMD)
+        var(DEPLOY_AT_ACTION_CMD),
+        var(DEPLOY_ACTION_CMD)
     )
 )"
 
@@ -196,11 +208,13 @@ GEOFENCE_CMD="ros2 run smarc_basic geofence_node --ros-args -r __ns:=/$ROBOT_NAM
 
 HUMAN_LOG_CMD="ros2 run smarc_basic log_action --ros-args -r __ns:=/$ROBOT_NAME -p use_sim_time:=$USE_SIM_TIME"
 WAIT_CMD="ros2 run smarc_basic wait_action --ros-args -r __ns:=/$ROBOT_NAME -p use_sim_time:=$USE_SIM_TIME"
+EMERGENCY_ACTION_CMD="ros2 run evolo_emergency_action server --ros-args -r __ns:=/$ROBOT_NAME -p use_sim_time:=$USE_SIM_TIME"
 
 tmux_make_layout "$SESSION" BasicActions "
 row(
     col(var(GEOFENCE_CMD), var(HUMAN_LOG_CMD)),
-    col(var(WAIT_CMD))
+    col(var(WAIT_CMD)),
+    col(var(EMERGENCY_ACTION_CMD))
 )"
 
 # Health monitoring
@@ -222,7 +236,7 @@ col(
 # WARA-PS bridge
 WARA_PS_MQTT_CMD="sleep 7; ros2 launch str_json_mqtt_bridge waraps_bridge.launch broker_addr:=20.240.40.232 broker_port:=1884 robot_name:=$ROBOT_NAME domain:=$AGENT_TYPE realsim:=$REALSIM use_sim_time:=$USE_SIM_TIME context:=$CONTEXT"
 #Evolo/ puffin broker
-EVOLO_WARA_PS_MQTT_CMD="sleep 7; ros2 launch evolo_private waraps_bridge.launch robot_name:=$ROBOT_NAME domain:=$AGENT_TYPE realsim:=$REALSIM use_sim_time:=$USE_SIM_TIME context:=$CONTEXT"
+EVOLO_WARA_PS_MQTT_CMD="sleep 7; ros2 launch evolo_private waraps_bridge.launch robot_name:=$ROBOT_NAME domain:=$AGENT_TYPE realsim:=$REALSIM use_sim_time:=$USE_SIM_TIME context:=evolo"
 
 tmux_make_layout "$SESSION" waraps-mqtt "
 col(
@@ -357,7 +371,8 @@ if [ $CAMERA_GIMBALL_DRIVER == "True" ]; then
         tf_frame_prefix:=$ROBOT_NAME/ \
         camera_ip:=192.168.2.210 \
         camera_port:=2332 \
-        camera_below_base:=False"
+        camera_below_base:=False \
+        publish_period_ms:=100"
     GIMBAL_CAM_ACTION_CMD="ros2 launch z1_pro_driver z1_pro_action_launch.py \
         robot_name:=\"$ROBOT_NAME\" \
         use_sim_time:=$USE_SIM_TIME"
@@ -428,7 +443,7 @@ fi
 if [ "$LOCATION_SOURCE" = "MQTT" ] || [ "$LOCATION_SOURCE" = "SERIAL" ]; then
     ODOM_INIT_CMD="ros2 launch evolo_captain_interface evolo_captain_odom_initializer_launch.py use_sim_time:=$USE_SIM_TIME"
     CAPTAIN_TO_ODOM_CMD="ros2 launch evolo_captain_interface evolo_captain_odom_launch.py use_sim_time:=$USE_SIM_TIME"
-    tmux_make_layout "$SESSION" SBG-localization "
+    tmux_make_layout "$SESSION" Captain-localization "
     col(
         var(ODOM_INIT_CMD),
         var(CAPTAIN_TO_ODOM_CMD)
@@ -444,7 +459,7 @@ fi
 if [ $LIDAR_PROCESSING == "True" ]; then
     POINTCLOUD_PEPROCESSING_CMD="ros2 launch pointcloud_preprocessing pointcloud_preprocessing_launch_evolo.py use_sim_time:=$USE_SIM_TIME"
     POINTCLOUD_CLUSTERING_CMD="ros2 run clustering_segmentation clustering_segmentation --ros-args -p use_sim_time:=$USE_SIM_TIME -p DynamicStatic_clusters_segmentation:=True"
-    tmux_make_layout "$SESSION" SBG-localization "
+    tmux_make_layout "$SESSION" pointcloud-processing "
     col(
         var(POINTCLOUD_PEPROCESSING_CMD),
         var(POINTCLOUD_CLUSTERING_CMD)
@@ -492,7 +507,7 @@ fi
 #Node-red-translator
 if [ $JSON_TRANSLATOR == "True" ]; then
     JSON_TRANSLATOR_CMD="ros2 launch evolo_json_bridge json_bridge_launch.py"
-    tmux_make_layout "$SESSION" json_translator"
+    tmux_make_layout "$SESSION" json_translator "
     col(
         var(JSON_TRANSLATOR_CMD),
     )"
