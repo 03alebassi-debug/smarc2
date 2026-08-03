@@ -30,6 +30,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'hook_kalman_filter_node = sway_controller.Kalman_Filter.hook_kalman_filter_node:main',
+            'hook_ground_truth_comparator_node = sway_controller.Kalman_Filter.hook_ground_truth_comparator_node:main',
         ],
     },
 )
