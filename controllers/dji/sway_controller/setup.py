@@ -30,6 +30,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'estimate_length_and_damping_node = sway_controller.Kalman_Filter.estimate_length_and_damping_node:main',
         ],
     },
 )
