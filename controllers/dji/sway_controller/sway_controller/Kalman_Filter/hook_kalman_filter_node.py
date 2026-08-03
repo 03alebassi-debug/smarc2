@@ -39,14 +39,7 @@ def _load_identified_gains(model_path: str):
 
 def _wait_for_identified_params(node: Node,
                                 timeout_sec: float = 5.0) -> "tuple[float, float]|None":
-    """Read the L/xi that estimate_length_and_damping latched.
-
-    It cannot come back through the action: BaseAction's Result is only
-    `bool success`, and GentlerActionServer publishes feedback ONLY while
-    _loop_inner returns None - so when _finalize() returns True the action ends
-    without ever emitting a final feedback. The sysid therefore publishes the
-    values on a latched topic, which this reads. Latched means the message is
-    already waiting, so this returns almost immediately."""
+    
     received: dict = {}
     qos_latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                              durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
@@ -69,11 +62,7 @@ def _wait_for_identified_params(node: Node,
 
 
 def _run_identification_action(node: Node, timeout_sec: float = 60.0) -> bool:
-    """Calls estimate_length_and_damping and blocks (via spin_until_future_complete,
-    since nothing is spinning the node yet at this point in startup) until it
-    finishes. BaseAction's result only carries a plain bool - the actual L/xi
-    values are read from the file estimate_length_and_damping_node saves on
-    success, not from this action's result itself. Returns True on success."""
+    
     action_name = 'estimate_length_and_damping'
     client = ActionClient(node, BaseAction, action_name)
 
