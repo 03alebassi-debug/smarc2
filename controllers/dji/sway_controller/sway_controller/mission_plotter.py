@@ -1,24 +1,8 @@
-"""Standalone plotting helper for a move_to_dumped mission - what the sway
-damping actually did. Kept independent of rclpy (same pattern as
-ekf_ground_truth_plotter) so it can be called from a node when a mission ends,
-or reused offline against logged data. It only needs plain sample dicts:
-
-    {'t': <seconds since goal, float>, 'phase': 'STABILIZING'|'MOVING',
-     'theta_x','theta_y','omega_x','omega_y',      # swing estimate, NaN if none
-     'p_x','p_y', 'p_ref_x','p_ref_y',             # drone vs plan, map frame
-     'v_ff_x','v_ff_y', 'trim_x','trim_y',         # command breakdown, base_flat
-     'u_x','u_y'}                                  # what was published
-
-Unlike the EKF plots there is no ground truth here - the question these answer
-is not "is the estimate right" but "did the controller behave", so they are
-built around the three things that decide that: how much the payload swung, how
-well the plan was tracked, and how hard the feedback had to work.
-"""
 
 import os
 
 import matplotlib
-matplotlib.use('Agg')  # headless - no display needed to save PNGs from a node
+matplotlib.use('Agg')  
 import matplotlib.pyplot as plt
 import numpy as np
 

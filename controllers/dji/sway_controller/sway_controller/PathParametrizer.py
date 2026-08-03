@@ -39,7 +39,6 @@ class PathParametrizer:
         self._a_fn = sp.lambdify(t, a, 'numpy')                     
 
     def sample(self, t: float):
-        """Return (p_ref, v_ref) in R^2, with the ends held (C^2 hold)."""
         
         tc = min(max(t, 0.0), self._missionTime)          
         s = float(self._s_fn(tc))

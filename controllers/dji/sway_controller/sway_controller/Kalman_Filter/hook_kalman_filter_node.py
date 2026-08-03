@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 
 import os
+import time
 
 import control as ct
 import numpy as np
 import rclpy
-import yaml
 from ament_index_python.packages import get_package_share_directory
 from nav_msgs.msg import Odometry
 from rclpy.action import ActionClient
@@ -13,17 +13,14 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, QoSDurabilityPolicy
 from rclpy.signals import SignalHandlerOptions
 from smarc_msgs.action import BaseAction
-from std_msgs.msg import String
+from std_msgs.msg import String, Float64MultiArray
 
 from sway_controller.Kalman_Filter.ekf_ground_truth_plotter import save_all_plots
 from sway_controller.HookKalmanFilter import HookKalmanFilter
 
 
 def _load_identified_gains(model_path: str):
-    """Extract (k_x, tau_x, k_y, tau_y) from the same identified continuous
-    model used by alars_move_to_dumped_action_server._build_transfer_function /
-    _get_node_parameters, so both controllers always agree on the drone's
-    velocity-response dynamics."""
+    
     d = np.load(model_path)
 
     tf_x = ct.tf(
@@ -43,7 +40,39 @@ def _load_identified_gains(model_path: str):
     return k_x, tau_x, k_y, tau_y
 
 
-def _run_identification_action(node: Node, robot_name: str, timeout_sec: float = 60.0) -> bool:
+def _wait_for_identified_params(node: Node, robot_name: str,
+                                timeout_sec: float = 5.0) -> "tuple[float, float]|None":
+    """Read the L/xi that estimate_length_and_damping latched.
+
+    It cannot come back through the action: BaseAction's Result is only
+    `bool success`, and GentlerActionServer publishes feedback ONLY while
+    _loop_inner returns None - so when _finalize() returns True the action ends
+    without ever emitting a final feedback. The sysid therefore publishes the
+    values on a latched topic, which this reads. Latched means the message is
+    already waiting, so this returns almost immediately."""
+    received: dict = {}
+    qos_latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+
+    def _cb(msg):
+        if len(msg.data) >= 2:
+            received['L'] = float(msg.data[0])
+            received['xi'] = float(msg.data[1])
+
+    sub = node.create_subscription(
+        Float64MultiArray, f'{robot_name}/hook_pendulum_params_identified', _cb, qos_latched)
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline and not received:
+        rclpy.spin_once(node, timeout_sec=0.05)
+    node.destroy_subscription(sub)
+
+    if not received:
+        return None
+    return received['L'], received['xi']
+
+
+def _run_identification_action(node: Node, robot_name: str,
+                               timeout_sec: float = 60.0) -> bool:
     """Calls estimate_length_and_damping and blocks (via spin_until_future_complete,
     since nothing is spinning the node yet at this point in startup) until it
     finishes. BaseAction's result only carries a plain bool - the actual L/xi
@@ -57,16 +86,17 @@ def _run_identification_action(node: Node, robot_name: str, timeout_sec: float =
         node.get_logger().warning(f'Action server {action_name} not available after {timeout_sec}s')
         return False
 
+    # Feedback is progress reporting only - it cannot carry the result. See
+    # _wait_for_identified_params for why.
+    def _on_feedback(fb):
+        node.get_logger().info(f'[identification] {fb.feedback.feedback.data}',
+                               throttle_duration_sec=1.0)
+
     goal = BaseAction.Goal()
     goal.goal = String(data='{}')
 
     node.get_logger().info('Requesting hook pendulum identification (this will excite a swing)...')
-    send_goal_future = client.send_goal_async(
-        goal,
-        feedback_callback=lambda fb: node.get_logger().info(
-            f'[identification] {fb.feedback.feedback.data}', throttle_duration_sec=1.0
-        )
-    )
+    send_goal_future = client.send_goal_async(goal, feedback_callback=_on_feedback)
     rclpy.spin_until_future_complete(node, send_goal_future, timeout_sec=timeout_sec)
     goal_handle = send_goal_future.result()
     if goal_handle is None or not goal_handle.accepted:
@@ -95,31 +125,20 @@ def _odom_to_sample(msg: Odometry) -> dict:
 
 
 def main():
-    # Disable rclpy's own automatic SIGINT handling: by default it can call
-    # rclpy.shutdown() internally on Ctrl+C, racing with our own except
-    # KeyboardInterrupt below and causing "rcl_shutdown already called" plus
-    # "publisher's context is invalid" once it wins that race. With this,
-    # our own try/except/finally is the only thing that shuts things down.
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
 
     node = Node("hook_kalman_filter_node")
 
     node.declare_parameter("robot_name", "M350")
-    # use_sim_time is auto-declared by rclpy's Node base class already.
     node.declare_parameter("loop_freq", 50)
-    # Negative = "not explicitly overridden" - falls back to the identified
-    # values from estimate_length_and_damping_node if available, see below.
     node.declare_parameter("L", -1.0)
     node.declare_parameter("xi", -1.0)
     node.declare_parameter("qc", 0.01)
     node.declare_parameter("sigma_initial", 1.0)
     node.declare_parameter("mahalanobis_thr", 16.0)
-    # Detections are dropped when the camera boresight is further than this from
-    # straight-down: the pendulum-angle measurement silently degenerates there.
+    
     node.declare_parameter("max_boresight_tilt_deg", 45.0)
-    # Empty by default: resolved below against dji_captain's installed share
-    # directory (same model alars_move_to_dumped_action_server uses), unless
-    # explicitly overridden.
+    
     node.declare_parameter("continuous_model_path", "")
     node.declare_parameter("ground_truth_topic", "hook_ground_truth_base_flat")
     node.declare_parameter("plot_output_dir", "/home/aleba/ekf_plots")
@@ -139,10 +158,6 @@ def main():
     raw_samples: list = []
     L = None
 
-    # hook_state is published BEST_EFFORT (HookKalmanFilter._create_publishers) -
-    # a RELIABLE subscriber (the default for a plain integer QoS depth) is
-    # incompatible with a BEST_EFFORT publisher in ROS2/DDS and silently
-    # receives nothing, so this must match.
     qos_best_effort10 = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,
                                     durability=QoSDurabilityPolicy.VOLATILE)
 
@@ -154,8 +169,7 @@ def main():
         Odometry, f'{robot_name}/hook_state',
         lambda msg: est_samples.append(_odom_to_sample(msg)), qos_best_effort10
     )
-    # Raw per-detection measurement (pre-fusion, pre-gating) - the clean signal
-    # for checking the camera->base_flat_link axis mapping against ground truth.
+    
     node.create_subscription(
         Odometry, f'{robot_name}/hook_raw_measurement',
         lambda msg: raw_samples.append(_odom_to_sample(msg)), qos_best_effort10
@@ -179,31 +193,30 @@ def main():
         L = node.get_parameter("L").value
         xi = node.get_parameter("xi").value
         if L < 0 or xi < 0:
-            if not _run_identification_action(node, robot_name):
-                node.get_logger().warning(
-                    'estimate_length_and_damping did not succeed - falling back to '
-                    'a previously saved fit (if any) or placeholder defaults'
-                )
-
-            fitted_path = os.path.expanduser(f"~/.ros/hook_pendulum_params_{robot_name}.yaml")
-            if os.path.exists(fitted_path):
-                with open(fitted_path) as f:
-                    fitted = yaml.safe_load(f)
+            ok = _run_identification_action(node, robot_name)
+            identified = _wait_for_identified_params(node, robot_name) if ok else None
+            if identified is not None and identified[0] > 0.0:
                 if L < 0:
-                    L = fitted["length"]
+                    L = identified[0]
                 if xi < 0:
-                    xi = fitted["damping"]
-                node.get_logger().info(f"Loaded L={L}, xi={xi} from {fitted_path}")
+                    xi = identified[1]
+                node.get_logger().info(f'Using identified L={L}, xi={xi} from the action')
             else:
-                if L < 0:
-                    L = 10.0
-                if xi < 0:
-                    xi = 0.1
-                node.get_logger().warning(
-                    f"No fitted pendulum params found at {fitted_path} and L/xi not "
-                    f"overridden - using placeholder defaults L={L}, xi={xi}. Run "
-                    f"estimate_length_and_damping_node first for real values."
+                # Deliberately fatal. There is no file fallback any more, and
+                # running on placeholder values would silently mistune BOTH the
+                # estimator and - via hook_pendulum_params - the controller,
+                # which is worse than not starting at all.
+                node.get_logger().error(
+                    'estimate_length_and_damping did not return usable L/xi '
+                    f'(action ok={ok}, params={identified}). Not starting the filter: '
+                    'it would have to invent a pendulum. Check that '
+                    'estimate_length_and_damping_node is running and that the hook '
+                    'is visible, or pass L and xi explicitly as parameters.'
                 )
+                node.destroy_node()
+                if rclpy.ok():
+                    rclpy.shutdown()
+                return
 
         HookKalmanFilter(
             node,

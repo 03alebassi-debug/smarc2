@@ -1,3 +1,5 @@
+import json
+
 from enum import Enum, auto
 
 import numpy as np
@@ -6,6 +8,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, QoSDurabilityPolicy
 
 from geometry_msgs.msg import TwistStamped
+from std_msgs.msg import Float64MultiArray, MultiArrayDimension
 from dji_msgs.msg import Topics as DJITopics
 from dji_msgs.msg import Links as DJILinks
 from dji_msgs.msg import LabeledOBBs
@@ -23,7 +26,7 @@ class EstimateLengthAndDamping:
     """Action server that identifies the hook's effective pendulum length (L)
     and damping ratio (xi): commands a short velocity step to excite a swing,
     then fits the free-decay oscillation observed via YOLO hook detections.
-    Meant to be run once, before HookKalmanFilter, to obtain real L/xi values
+    Meant to be run once, to obtain real L/xi values
     instead of hand-picked guesses.
 
     Action: "estimate_length_and_damping" (smarc_msgs/action/BaseAction, JSON goal/result)
@@ -44,19 +47,12 @@ class EstimateLengthAndDamping:
 
     G = 9.81
 
-    def __init__(self, node: Node, robot_name: str, output_path: "str|None" = None):
+    def __init__(self, node: Node, robot_name: str):
         self._node: Node = node
         self._robot_name: str = robot_name
-        self._output_path: "str|None" = output_path
 
         self.BASE_FLAT_FRAME: str = self._robot_name + '/' + DJILinks.BASE_FLAT
 
-        # Both image axes are tracked, and which one carries the swing is decided
-        # from the data - see _select_axis. Fitting the period on a hardcoded
-        # image axis is fragile: with the gimbal pointed down, image-horizontal
-        # maps to base_flat Y while the excitation below drives body X (which
-        # appears on image-vertical), so the original code measured the period on
-        # the axis it does NOT excite - the one dominated by detection noise.
         self._last_x: "float|None" = None   # image horizontal
         self._last_y: "float|None" = None   # image vertical
         self._new_detection: bool = False   # set by _detection_callback, consumed once
@@ -98,6 +94,28 @@ class EstimateLengthAndDamping:
             TwistStamped, self._robot_name + '/' + DJITopics.VELOCITY_SETPOINT_TOPIC, qos_profile=qos_best_effort10
         )
 
+        # The identification result. This topic - not the action Result and not
+        # the feedback - is how L/xi leave this node: BaseAction's Result is
+        # only `bool success`, and GentlerActionServer publishes feedback ONLY
+        # while _loop_inner returns None, so the moment _finalize() returns True
+        # the action completes and no final feedback is ever sent. Latched
+        # (TRANSIENT_LOCAL) so a consumer that subscribes afterwards still gets it.
+        qos_latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                                 durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+        self._params_publisher = self._node.create_publisher(
+            Float64MultiArray, self._robot_name + '/hook_pendulum_params_identified',
+            qos_profile=qos_latched
+        )
+
+    def _publish_identified_params(self, length: float, xi: float):
+        msg = Float64MultiArray()
+        msg.layout.dim = [MultiArrayDimension(label='length', size=1, stride=2),
+                          MultiArrayDimension(label='damping', size=1, stride=1)]
+        msg.data = [float(length), float(xi)]
+        self._params_publisher.publish(msg)
+        self.log(f'Published identified params on '
+                 f'{self._robot_name}/hook_pendulum_params_identified')
+
     def _detection_callback(self, msg):
         hook_indices = [i for i, cls_id in enumerate(msg.ids) if cls_id == "hook"]
         if not hook_indices:
@@ -124,7 +142,6 @@ class EstimateLengthAndDamping:
         setpoint.twist.linear.y = vy
         self._ref_publisher.publish(setpoint)
 
-    # --- GentlerActionServer callbacks ---
 
     def _on_goal_received(self, goal_request: dict) -> bool:
         try:
@@ -134,9 +151,7 @@ class EstimateLengthAndDamping:
             self._min_periods         = int(goal_request.get('min_periods', 4))
             self._refractory_window   = float(goal_request.get('refractory_window', 1.5))
             self._smoothing_window    = int(goal_request.get('smoothing_window', 5))
-            # How long to watch both image axes before deciding which one the
-            # swing is on (see _select_axis). Needs to cover a decent fraction of
-            # a period; the pendulum here is ~4-5s.
+            
             self._axis_selection_duration = float(goal_request.get('axis_selection_duration', 2.0))
             return True
         except Exception:
@@ -152,9 +167,16 @@ class EstimateLengthAndDamping:
         self._phase_start_time = self.now_time
         self._equilibrium: "float|None" = None
         self._result = {"success": False, "length": 0.0, "damping": 0.0, "message": ""}
+        self._finalized = False
         self._reset_period_estimation()
 
     def _give_feedback(self) -> str:
+        # Once finished, the feedback carries the RESULT as JSON. BaseAction's
+        # Result is only `bool success`, so this string is the only channel that
+        # can return L/xi to the caller in-band; hook_kalman_filter_node parses
+        # it instead of round-tripping through the yaml file.
+        if self._finalized:
+            return json.dumps(self._result)
         if self._phase == _Phase.CAPTURE_EQUILIBRIUM:
             return "Waiting for a hook detection to establish equilibrium..."
         if self._phase == _Phase.EXCITING:
@@ -174,7 +196,7 @@ class EstimateLengthAndDamping:
                     self._result["message"] = "No hook detection available to establish equilibrium"
                     return False
                 return None
-            # Set once the swing axis is known, in _select_axis.
+            
             self._equilibrium = None
             self._phase = _Phase.EXCITING
             self._phase_start_time = now
@@ -190,18 +212,9 @@ class EstimateLengthAndDamping:
             return None
 
         if self._phase == _Phase.COLLECTING:
-            # Only consume a sample when the detector has actually produced a NEW
-            # one. This loop runs far faster than detections arrive, and feeding
-            # the same value repeatedly builds flat plateaus into the smoothed
-            # signal, which defeats the strict slope-sign extremum test below
-            # (it needs slope_before > 0 AND slope_after < 0; a plateau gives 0)
-            # - so no extrema are found, no periods are measured, and L comes out
-            # as "no full period observed". This was masked while the node was
-            # clock-starved to ~3Hz, i.e. roughly the detection rate itself.
             if self._last_x is not None and self._last_y is not None and self._new_detection:
                 self._new_detection = False
                 if self._axis_index is None:
-                    # Still deciding which image axis actually carries the swing.
                     self._axis_buffer.append((now, self._last_x, self._last_y))
                     if now - self._phase_start_time >= self._axis_selection_duration:
                         self._select_axis()
@@ -230,23 +243,12 @@ class EstimateLengthAndDamping:
             "damping": float(xi),
             "message": f"L={length:.3f}m, xi={xi:.4f}, from {self._n_periods} periods"
         }
+        self._finalized = True
         self.log(self._result["message"])
-
-        if self._output_path is not None:
-            self._save_result(length, xi)
+        self._publish_identified_params(length, xi)
 
         return True
 
-    def _save_result(self, length: float, xi: float):
-        import yaml
-        data = {"robot_name": self._robot_name, "length": float(length), "damping": float(xi)}
-        with open(self._output_path, 'w') as f:
-            yaml.safe_dump(data, f)
-        self.log(f"Saved identified L/xi to {self._output_path}")
-
-    # --- Period estimation: moving-average smoothing + slope-sign extremum
-    #     detection + refractory window, first period taken as prior,
-    #     subsequent periods incrementally averaged ---
 
     def _select_axis(self):
         """Decide which image axis the swing is actually on, from the first
@@ -295,11 +297,7 @@ class EstimateLengthAndDamping:
         self._new_detection = False
 
     def _process_measurement(self, t: float, x: float):
-        # Smooth first: raw single-frame detections are noisy enough that,
-        # applied directly, the slope-sign check below fires on jitter many
-        # times per real swing instead of once - a moving average over the
-        # last few samples suppresses that without needing a huge refractory
-        # window to compensate.
+        
         self._raw_buffer.append(x)
         if len(self._raw_buffer) > self._smoothing_window:
             self._raw_buffer.pop(0)
@@ -320,7 +318,7 @@ class EstimateLengthAndDamping:
             return
 
         if self._last_extremum_time is not None and (t1 - self._last_extremum_time) < self._refractory_window:
-            return  # too soon since the last accepted extremum - likely noise, reject
+            return  
 
         self._accept_extremum(t1, x1, is_max)
 
@@ -328,20 +326,12 @@ class EstimateLengthAndDamping:
         self._extrema.append((t, x, is_max))
         self._last_extremum_time = t
 
-        # Pair maxima with maxima (and minima with minima) using the slope-sign
-        # classification computed above, NOT sign(x - equilibrium). The
-        # equilibrium is a single instantaneous pre-excitation sample, and the
-        # hook's rest position in base_flat_link shifts once the drone moves to
-        # excite it - so that comparison could put peaks *and* troughs on the
-        # same side, making this a peak-to-trough (i.e. HALF) period and
-        # underestimating L by ~4x (L scales with T^2). The slope-sign
-        # classification is immune to any such offset or drift.
         same_side_prev = next(
             ((pt, px) for pt, px, pmax in reversed(self._extrema[:-1]) if pmax == is_max),
             None
         )
         if same_side_prev is None:
-            return  # first extremum of this type - nothing to compare against yet
+            return  
 
         period = t - same_side_prev[0]
 
@@ -351,7 +341,6 @@ class EstimateLengthAndDamping:
             self.log(f'First period (prior): {period:.3f}s')
         else:
             self._n_periods += 1
-            # incremental mean: avg += (new - avg) / n
             self._period_estimate += (period - self._period_estimate) / self._n_periods
             self.log(f'Period #{self._n_periods}: {period:.3f}s, running average: {self._period_estimate:.3f}s')
 
@@ -363,11 +352,6 @@ class EstimateLengthAndDamping:
         if len(self._extrema) < 3:
             return 0.0
 
-        # Measure amplitudes about the midpoint of the observed swing, not about
-        # self._equilibrium: that is a single instantaneous pre-excitation sample
-        # and the rest position shifts once the drone moves, so an offset there
-        # biases every amplitude and can flatten the fit (a plausible cause of
-        # the "xi always 0" results seen before).
         maxima = [x for _, x, is_max in self._extrema if is_max]
         minima = [x for _, x, is_max in self._extrema if not is_max]
         if maxima and minima:
@@ -377,7 +361,7 @@ class EstimateLengthAndDamping:
 
         times = np.array([t for t, _, _ in self._extrema])
         amps  = np.array([abs(x - centre) for _, x, _ in self._extrema])
-        amps  = np.clip(amps, 1e-9, None)  # guard against log(0)
+        amps  = np.clip(amps, 1e-9, None)  
 
         slope, _ = np.polyfit(times, np.log(amps), 1)
         return max(0.0, float(-slope / wn))

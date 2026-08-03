@@ -1,10 +1,3 @@
-"""Standalone plotting helper - reproduces the estimate-vs-ground-truth comparison
-plots (position, XY/spectra/publication-interval diagnostics, velocity) as PNG files.
-Kept independent of rclpy so it can be called from a node on shutdown, or reused
-offline against logged/bagged data - it only needs plain sample dicts:
-
-    {'t': <seconds, float>, 'x': ..., 'y': ..., 'vx': ..., 'vy': ..., 'vz': ...}
-"""
 
 import os
 
@@ -148,12 +141,7 @@ def plot_diagnostics(gt_samples, est_samples, output_dir, robot_name, L=None):
 
 
 def plot_raw_measurement(gt_samples, raw_samples, output_dir, robot_name):
-    """Raw per-detection hook position (pre-fusion, pre-gating) vs ground truth,
-    per axis. This isolates the camera->base_flat_link axis mapping: unlike
-    hook_state, it is NOT affected by Mahalanobis rejection or cmd_vel/odom
-    forcing, so if the frames are consistent, raw x should track ground-truth x
-    (and y with y). A persistent x<->y swap here is a genuine frame bug; a swap
-    that only shows in hook_state is not."""
+    
     t_gt, x_gt, y_gt, *_ = _to_arrays(gt_samples)
     t_raw, x_raw, y_raw, *_ = _to_arrays(raw_samples)
     t0 = min(t_gt[0], t_raw[0])

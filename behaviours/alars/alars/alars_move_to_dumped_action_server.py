@@ -11,6 +11,7 @@ from geographic_msgs.msg import GeoPoint
 from geometry_msgs.msg   import PoseStamped, TwistStamped, Vector3Stamped
 from nav_msgs.msg        import Odometry
 from sensor_msgs.msg     import JointState
+from std_msgs.msg        import Float64MultiArray
 
 
 from smarc_action_base.gentler_action_server import GentlerActionServer
@@ -23,7 +24,6 @@ from dji_msgs.msg import Links  as DJILinks
 import traceback
 import time
 import os
-import yaml
 
 from sway_controller import PathParametrizer, ZVD, LQR, save_mission_plots
 
@@ -39,17 +39,14 @@ class MoveToDumpedAction():
         self.BASE_FLAT_FRAME : str = self._robot_name + '/' + DJILinks.BASE_FLAT
         self._drone_state = DroneState(node, self._robot_name)
 
-        # The LQR is built per mission in _on_goal_received, from the L/xi that
-        # estimate_length_and_damping identified - not from the node parameters,
-        # which are only a fallback.
+        
         self._lqr:None|LQR = None
         self._lqr_stabilize:None|LQR = None
         self._swing_state:None|JointState = None
+        self._pendulum_params:None|tuple = None
         self._drone_velocity_base_flat:None|np.ndarray = None
         self._create_subscriptions()
 
-        # Defined here too, not only in _on_goal_received: a cancel can arrive
-        # before any goal has been accepted, and _save_mission_plots runs there.
         self._phase:str = 'MOVING'
         self._mission_samples:list = []
         self._goal_received_time:float = 0.0
@@ -98,66 +95,28 @@ class MoveToDumpedAction():
         node.declare_parameter('max_speed', 1.0, double_desc)
         node.declare_parameter('max_acceleration', 2.0, double_desc)
         node.declare_parameter('sattle_extra', 20.0, double_desc)
-        # Fallbacks only - the identified values from estimate_length_and_damping
-        # are preferred, see _load_identified_pendulum_params.
-        node.declare_parameter('rope_length', 10.0, double_desc)
-        node.declare_parameter('xi', 0.1, double_desc)
-        # Set False to fly the ZVD feedforward open-loop exactly as before, which
-        # is the A/B comparison for whether the feedback is actually helping.
+        
+        
         node.declare_parameter('enable_lqg', True, bool_desc)
-        # 10.0 measured: at rho=1 the trim saturated the 0.5 m/s cap and the loop
-        # limit-cycled at ~2.2s (nothing like the 4.6s pendulum). At rho=10 the
-        # trim stays ~0.1 m/s, never saturates, and the swing decays INTO the
-        # settle band during the move. rho enters the gain as ~sqrt(rho), so it
-        # must move by decades to matter.
+        
         node.declare_parameter('lqg_rho', 10.0, double_desc)
         node.declare_parameter('lqg_theta_max', 0.3, double_desc)
         node.declare_parameter('lqg_position_max', 0.3, double_desc)
-        # Beyond this the swing estimate is treated as unusable and the loop
-        # falls back to pure feedforward rather than correcting on stale data.
+        
         node.declare_parameter('max_estimate_age', 0.5, double_desc)
-        # Hard cap on the feedback trim alone, separate from the total-command
-        # saturation. Saturating the TOTAL still lets a huge trim swamp the
-        # feedforward; capping the trim keeps the plan in charge and keeps the
-        # loop inside the region where the linear LQR design actually holds.
+        
         node.declare_parameter('max_trim_speed', 0.5, double_desc)
-        # Above this swing the linearised model (sin(theta) ~ theta) is invalid
-        # and the gain demands far more authority than exists, so feedback is
-        # dropped rather than applied wrongly.
         node.declare_parameter('max_theta_for_lqg', 0.35, double_desc)
 
-        # Damp the payload before departing. This matters because
-        # estimate_length_and_damping deliberately EXCITES a swing to identify
-        # the pendulum, so the hook is usually still moving when a goal arrives -
-        # and ZVD only avoids exciting NEW swing, it cannot cancel existing swing.
         node.declare_parameter('stabilize_before_mission', True, bool_desc)
         node.declare_parameter('stabilize_theta_tol', 0.02, double_desc)    # rad
         node.declare_parameter('stabilize_omega_tol', 0.05, double_desc)    # rad/s
         node.declare_parameter('stabilize_settle_time', 1.0, double_desc)   # s within tol
-        # 20s was measured too short: from the ~0.15rad the identification
-        # leaves behind, the loop damps to ~0.05rad in 20s (vs ~0.089 from
-        # natural decay alone - so it IS working, just not that fast). Reaching
-        # the 0.02rad tolerance needs longer. NOTE the plant simulation
-        # over-predicts this badly - trust the flight logs, not the model.
         node.declare_parameter('stabilize_timeout', 45.0, double_desc)      # s
-        # Cost weights for the stabilising gain, Bryson style (weight =
-        # 1/max_deviation^2). Deliberately NOT the mission weights: here the
-        # payload is what matters, so the swing tolerance is tight and the
-        # position tolerance is loose - we accept drifting a couple of metres if
-        # that is what it takes to kill the swing.
-        # Its OWN control penalty, separate from lqg_rho. Stabilising needs more
-        # authority than trimming: the mission gain only nudges an already-good
-        # feedforward, whereas here the command IS the whole control action and
-        # it has to actually kill the swing before departure. rho=10 (good for
-        # the mission) was measured too soft to settle 0.07rad inside the
-        # timeout; rho=2 settles it in ~3.4s and still does not saturate.
         node.declare_parameter('stabilize_rho', 2.0, double_desc)
         node.declare_parameter('stabilize_theta_max', 0.3, double_desc)     # rad
         node.declare_parameter('stabilize_position_max', 2.0, double_desc)  # m
 
-        # Plots are written when a mission ENDS (success, failure or cancel),
-        # not on node shutdown as hook_kalman_filter_node does - one set per
-        # mission, and they survive the node staying up for the next goal.
         node.declare_parameter('plot_missions', True, bool_desc)
         node.declare_parameter('plot_output_dir', '/home/aleba/move_to_dumped_plots', string_desc)
 
@@ -190,10 +149,6 @@ class MoveToDumpedAction():
         self._max_acceleration = self._node.get_parameter('max_acceleration').get_parameter_value().double_value
         self._sattle_extra = self._node.get_parameter('sattle_extra').get_parameter_value().double_value
 
-        self.rope_length = self._node.get_parameter('rope_length').get_parameter_value().double_value
-        self.xi = self._node.get_parameter('xi').get_parameter_value().double_value
-        self.wn = np.sqrt(G/self.rope_length)
-        self.dwn = 2 * self.xi * self.wn
 
         self._enable_lqg = self._node.get_parameter('enable_lqg').get_parameter_value().bool_value
         self._lqg_rho = self._node.get_parameter('lqg_rho').get_parameter_value().double_value
@@ -238,42 +193,53 @@ class MoveToDumpedAction():
                  f'stab_theta_max={self._stabilize_theta_max:.3f} '
                  f'max_trim={self._max_trim_speed:.2f} v_max={self._max_speed:.2f}')
 
-    def _load_identified_pendulum_params(self) -> tuple[float, float]:
-        """L/xi as identified by estimate_length_and_damping, falling back to the
-        node parameters. Read per mission rather than once at startup so a fresh
-        identification is picked up without restarting this node - and because
-        the rope can physically change between missions."""
-        path = os.path.expanduser(f'~/.ros/hook_pendulum_params_{self._robot_name}.yaml')
-        try:
-            with open(path) as f:
-                fitted = yaml.safe_load(f)
-            L = float(fitted['length'])
-            xi = float(fitted['damping'])
-            # ZVD needs 0 < xi < 1 and LQR asserts the same; a sysid that fits
-            # xi = 0 exactly (it used to) would otherwise raise mid-mission.
-            if not (L > 0.0):
-                raise ValueError(f'non-positive length {L}')
-            if not (0.0 < xi < 1.0):
-                self.log(f'Identified xi={xi} outside (0,1), clamping for the controllers')
-                xi = min(max(xi, 1e-3), 0.99)
-            self.log(f'Using identified pendulum params from {path}: L={L:.3f}m, xi={xi:.4f}')
-            return L, xi
-        except Exception as e:
-            self.log(f'Could not use {path} ({e}); falling back to node parameters '
-                     f'L={self.rope_length}, xi={self.xi}')
-            return self.rope_length, self.xi
+    def _wait_for_pendulum_params(self, timeout: float = 30.0) -> bool:
+        """Block until hook_kalman_filter_node has latched the identified
+        pendulum. There is no file fallback and no default: without L/xi the
+        ZVD shaper and the LQR would both be built for an invented pendulum, so
+        it is better to refuse the goal than to fly a mistuned controller."""
+        if self._pendulum_params is not None:
+            return True
+        start = self.now_time
+        while (self.now_time - start) < timeout:
+            if self._pendulum_params is not None:
+                return True
+            self._node.get_logger().info(
+                'Waiting for hook_pendulum_params - is hook_kalman_filter_node '
+                'running and has its identification finished?',
+                throttle_duration_sec=2.0
+            )
+            time.sleep(0.5)
+        return False
+
+    def _load_identified_pendulum_params(self) -> "tuple[float, float]|None":
+        """L/xi as published by the Kalman filter, or None if unavailable.
+
+        Deliberately the values the FILTER is running with, so the controller
+        can never be tuned for a pendulum the estimator is not modelling."""
+        if not self._wait_for_pendulum_params():
+            self._node.get_logger().error(
+                'No hook_pendulum_params after 30s - rejecting the goal rather '
+                'than guessing L/xi.'
+            )
+            return None
+
+        L, xi = self._pendulum_params
+        if not (L > 0.0):
+            self._node.get_logger().error(f'Received non-positive rope length {L} - rejecting the goal')
+            return None
+        if not (0.0 < xi < 1.0):
+            # ZVD and LQR both assert 0 < xi < 1; a sysid that fits xi = 0
+            # exactly would otherwise raise mid-mission.
+            self.log(f'Identified xi={xi} outside (0,1), clamping for the controllers')
+            xi = min(max(xi, 1e-3), 0.99)
+        self.log(f'Using pendulum params from hook_pendulum_params: L={L:.3f}m, xi={xi:.4f}')
+        return L, xi
 
     def _create_subscriptions(self):
         qos_best_effort10 = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,
                                         durability=QoSDurabilityPolicy.VOLATILE)
 
-        # BARE relative names: this node is launched with namespace=robot_name
-        # (see alars_move_to_dumped_server_launch.py), so 'hook_swing_state'
-        # already resolves to /<robot>/hook_swing_state. Prefixing robot_name
-        # here as sway_controller's own nodes do - they are NOT namespaced -
-        # would give /<robot>/<robot>/... and silently receive nothing.
-        # Published BEST_EFFORT by HookKalmanFilter; a RELIABLE subscriber would
-        # also silently receive nothing.
         self._node.create_subscription(
             JointState, 'hook_swing_state',
             self._swing_state_callback, qos_best_effort10
@@ -282,16 +248,25 @@ class MoveToDumpedAction():
             Odometry, 'smarc/odom',
             self._odom_callback, 10
         )
+        # Latched by HookKalmanFilter (TRANSIENT_LOCAL), so this receives the
+        # identified pendulum even though the filter published it long before
+        # this subscription existed. Must MATCH that durability or nothing
+        # arrives.
+        qos_latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                                 durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+        self._node.create_subscription(
+            Float64MultiArray, 'hook_pendulum_params',
+            self._pendulum_params_callback, qos_latched
+        )
+
+    def _pendulum_params_callback(self, msg:Float64MultiArray):
+        if len(msg.data) >= 2:
+            self._pendulum_params = (float(msg.data[0]), float(msg.data[1]))
 
     def _swing_state_callback(self, msg:JointState):
         self._swing_state = msg
 
     def _odom_callback(self, msg:Odometry):
-        # This twist is in the ODOM frame, not the child frame the message type
-        # implies: dji_captain fills it from _velocity_ground, which it stamps
-        # ODOM_FRAME. The LQR state is in base_flat_link, which carries the
-        # drone's yaw, so it has to be rotated - at a 90deg heading the axes are
-        # otherwise completely swapped. (Same trap as in HookKalmanFilter.)
         vel_in = Vector3Stamped()
         vel_in.header.stamp = msg.header.stamp
         vel_in.header.frame_id = msg.header.frame_id
@@ -381,11 +356,12 @@ class MoveToDumpedAction():
             self._path_parametrizer = PathParametrizer(drone_position, target_position,
                                                          self._max_speed, self._max_acceleration)
             
-            # Both the shaper and the controller are built from the SAME
-            # identified pendulum, so a bad identification degrades them
-            # together rather than making them disagree with each other.
+
             self._refresh_tuning_parameters()
-            L, xi = self._load_identified_pendulum_params()
+            identified = self._load_identified_pendulum_params()
+            if identified is None:
+                return False
+            L, xi = identified
             self._mission_L, self._mission_xi = L, xi
 
             self.zvd = ZVD(L, xi)
@@ -407,8 +383,6 @@ class MoveToDumpedAction():
                 self.log(f'LQG enabled: closed-loop slowest pole {slowest:+.3f} '
                          f'(open-loop swing decay was {-xi*np.sqrt(G/L):+.4f})')
 
-                # Same plant, different priorities: tight on swing, loose on
-                # position. See the parameter declarations for why.
                 self._lqr_stabilize = LQR(
                     L=L, xi=xi,
                     k_x=self._k_x, tau_x=self._tau_x,
@@ -425,8 +399,6 @@ class MoveToDumpedAction():
                 self._lqr_stabilize = None
                 self.log('LQG disabled (enable_lqg=False) - flying the ZVD feedforward open loop')
 
-            # Stabilise first, then fly. Skipped when there is no controller to
-            # do it with, or when explicitly disabled.
             self._phase = ('STABILIZING'
                            if (self._stabilize_before_mission and self._lqr_stabilize is not None)
                            else 'MOVING')
@@ -507,13 +479,12 @@ class MoveToDumpedAction():
         if drone_in_map is None:
             return None
 
-        # Position error as a VECTOR in map, then rotated into base_flat.
         err_map = Vector3Stamped()
         err_map.header.stamp = self.now_stamp
         err_map.header.frame_id = self._drone_state.MAP_FRAME
         err_map.vector.x = float(drone_in_map[0] - position_reference_map[0])
         err_map.vector.y = float(drone_in_map[1] - position_reference_map[1])
-        err_map.vector.z = 0.0   # altitude-constant mission; z is held elsewhere
+        err_map.vector.z = 0.0   
         err_bf = self._drone_state.vector_stamped_in_base_flat(err_map)
         if err_bf is None:
             return None
@@ -533,15 +504,11 @@ class MoveToDumpedAction():
         r[i['v_y']] = velocity_reference_base_flat.vector.y
         r[i['v_z']] = 0.0
 
-        # The swing we want is none, so these references stay zero.
         x[i['theta_x']] = self._swing_state.position[0]
         x[i['theta_y']] = self._swing_state.position[1]
         x[i['omega_x']] = self._swing_state.velocity[0]
         x[i['omega_y']] = self._swing_state.velocity[1]
 
-        # Large-angle guard: past this the linearised model (sin th ~ th) does
-        # not hold and the gain asks for authority that does not exist, so the
-        # feedback would be actively wrong rather than merely weak.
         theta_mag = max(abs(x[i['theta_x']]), abs(x[i['theta_y']]))
         if theta_mag > self._max_theta_for_lqg:
             self._node.get_logger().warning(
@@ -553,22 +520,10 @@ class MoveToDumpedAction():
 
         u_fb = self._lqr.controlAction(x, r)
 
-        # Cap the TRIM itself, not just the total. Saturating only the total
-        # still lets a huge trim swamp the feedforward and turn the loop
-        # bang-bang, which is exactly how the first flight went unstable.
         trim_speed = float(np.linalg.norm(u_fb[:2]))
         if trim_speed > self._max_trim_speed:
             u_fb = u_fb * (self._max_trim_speed / trim_speed)
 
-        # A persistently large trim means the plan and the plant disagree (wrong
-        # L/xi, or a real disturbance) - the feedforward is supposed to be doing
-        # nearly all the work, so this is the cheap online health check.
-        # est_age is the measurement that decides whether the delay hypothesis
-        # for the 2026-07-26 instability holds: simulated, this loop tolerates
-        # ~0.5s of feedback delay and starts pumping the swing around 0.8s
-        # (63deg of phase at the 4.6s pendulum period). This is only the
-        # transport/consumption half - add the KF's own "meas age" (logged by
-        # hook_kalman_filter_node) for the total sensing delay.
         self._node.get_logger().info(
             f'[lqg] theta=[{x[i["theta_x"]]:+.3f},{x[i["theta_y"]]:+.3f}]rad '
             f'pos_err=[{x[i["p_x"]]:+.2f},{x[i["p_y"]]:+.2f}]m '
@@ -599,26 +554,17 @@ class MoveToDumpedAction():
         now = self.now_time
         elapsed = now - self._stabilize_started
 
-        # Reuse the mission correction machinery, but against the hold point and
-        # with the payload-weighted gain.
-        # During stabilise there is NO feedforward to protect, so the trim cap
-        # sized for "small correction on top of a plan" only throws authority
-        # away. It matters: at 0.15rad the hook's own horizontal speed is
-        # L*omega ~ 0.79 m/s, so a 0.5 m/s cap cannot chase the payload and the
-        # damping ends up barely better than letting it decay on its own. Give
-        # the whole speed budget to the trim here.
         mission_lqr, self._lqr = self._lqr, self._lqr_stabilize
         mission_cap, self._max_trim_speed = self._max_trim_speed, self._max_speed
         hold_velocity = Vector3Stamped()
         hold_velocity.header.stamp = self.now_stamp
-        hold_velocity.header.frame_id = self.BASE_FLAT_FRAME   # zero, frame irrelevant
+        hold_velocity.header.frame_id = self.BASE_FLAT_FRAME   
         u = self._lqg_correction(self._hold_position_map[:2], hold_velocity)
         self._lqr = mission_lqr
         self._max_trim_speed = mission_cap
 
         if u is None:
-            # No usable swing estimate - stabilising blind would be worse than
-            # not stabilising, so hold still and let the timeout move us on.
+            
             if elapsed > self._stabilize_timeout:
                 self._node.get_logger().warning(
                     'Could not stabilise (no usable swing estimate) - starting the mission anyway'
@@ -729,16 +675,6 @@ class MoveToDumpedAction():
         setpoint.twist.linear.y = float(u_xy[1])
         self.ref_publisher.publish(setpoint)
 
-        # ALSO tell the estimator what we just commanded. HookKalmanFilter
-        # subscribes to cmd_vel_drone_frame and uses it as the input u in
-        #     a_drone = -tau*v + k*u
-        # which is the term that forces the pendulum. Nothing was publishing
-        # this topic, so the filter had u = 0 permanently: it saw the drone's
-        # velocity but not the command driving it, and therefore mis-predicted
-        # the swing induced by our own control action. Harmless open loop (the
-        # error just sits in the estimate), but in closed loop the estimator is
-        # systematically wrong about the effect of the very command the
-        # controller is applying - which is a textbook way to destabilise.
         drone_frame_cmd = Vector3Stamped()
         drone_frame_cmd.header.stamp = setpoint.header.stamp
         drone_frame_cmd.header.frame_id = self.BASE_FLAT_FRAME
@@ -799,16 +735,12 @@ class MoveToDumpedAction():
             self.log("Failed to transform velocity reference into base_flat frame, skipping this tick.")
             return None
 
-        # Feedforward: the ZVD-shaped plan, which is what actually flies the
-        # mission. The LQR only trims it - see LQG.py.
         u = np.array([vel_in_base_flat.vector.x, vel_in_base_flat.vector.y], float)
 
         correction = self._lqg_correction(position_references, vel_in_base_flat)
         if correction is not None:
             u = u + correction[:2]
 
-        # Saturates the TOTAL command: the feedforward already respects max_speed
-        # by construction, the correction does not.
         u_published = self._publish_velocity(u)
         self._record_sample('MOVING', position_references,
                             (vel_in_base_flat.vector.x, vel_in_base_flat.vector.y),

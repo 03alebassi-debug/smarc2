@@ -5,32 +5,6 @@ import control as ct
 class LQR:
     """LQR state feedback for a drone carrying a hook on a rope.
 
-    Everything needed is passed to __init__ - the model is built here rather
-    than handed in, so a caller (alars_move_to_dumped_action_server) can simply
-    construct one per mission with the L/xi that estimate_length_and_damping
-    identified, the same way it constructs ZVD and PathParametrizer.
-
-    Together with HookKalmanFilter supplying the swing states this forms the
-    LQG loop; this class itself is only the deterministic (LQR) half.
-
-    IT CORRECTS THE REFERENCE, IT DOES NOT REPLACE IT. The ZVD-shaped velocity
-    from PathParametrizer stays the feedforward that actually flies the
-    mission; controlAction only adds a correction on top:
-
-        u = v_ff_shaped + controlAction(x_hat, x_ref)
-
-    where v_ff_shaped is what alars_move_to_dumped_action_server already
-    publishes open-loop today, x_hat is the measured/estimated state, and x_ref
-    is the same plan expressed as a full state (position and velocity from the
-    path, theta = omega = 0 - the swing we WANT is none). Feeding the state
-    error alone as u would throw away the shaped trajectory and turn a tracking
-    problem into a regulation one.
-
-    Consequence worth remembering: because the feedforward already avoids
-    exciting the pendulum, the correction term should normally be small. A
-    large, persistent correction means the plan and the plant disagree - wrong
-    L/xi, or a disturbance - and is worth logging rather than silently applying.
-
     Model, 10 states / 3 inputs, all in base_flat_link:
 
         index  state          dynamics
@@ -47,18 +21,8 @@ class LQR:
 
         inputs u = [vx_cmd, vy_cmd, vz_cmd]  (velocity setpoints, base_flat_link)
 
-    The omega rows are the drone's own acceleration entering the pendulum as
-    -a/L, identical to the model HookKalmanFilter propagates - so the estimator
-    and the controller agree on the plant.
-
-    (k, tau) are the identified velocity-response gains, i.e. the same numbers
-    _build_transfer_function pulls out of model_bla_diag_cmdvle.npz: for a
-    monic first-order fit b0/(s + a1), k = b0 and tau = a1 = 1/time_constant.
     """
 
-    # Public so callers assemble the state vector against names, not magic
-    # numbers - getting this ordering wrong is silent and produces a plausible
-    # looking but wrong gain.
     IDX = {
         'p_x': 0, 'p_y': 1, 'p_z': 2,
         'v_x': 3, 'v_y': 4, 'v_z': 5,
@@ -95,13 +59,11 @@ class LQR:
         )
         self._sys = ct.StateSpace(self._A, self._B, self._C, self._D)
 
-        # Bryson's rule: weights are 1/(max acceptable deviation)^2, so the
-        # tolerances below ARE the tuning knobs - there are no free gains.
-        self._pMax        = p_max                        # position tracking tol [m]
-        self._pzMax       = pz_max                       # altitude tol [m]
-        self._vMax        = v_max                        # command tol [m/s]
-        self._thetaMax    = theta_max                    # swing tol [rad]
-        self._thetaDotMax = self._thetaMax * self._wn    # derived, not guessed
+        self._pMax        = p_max                        
+        self._pzMax       = pz_max                       
+        self._vMax        = v_max                        
+        self._thetaMax    = theta_max                    
+        self._thetaDotMax = self._thetaMax * self._wn    
 
         # z = [p_x, p_y, p_z, th_x, w_x, th_y, w_y, v_z]
         i = self.IDX
@@ -128,9 +90,6 @@ class LQR:
 
         self._R = rho * np.diag([1/self._vMax**2]*3)
 
-        # Q is only positive SEMI-definite (v_x/v_y are not penalised directly),
-        # so lqr needs (A,B) stabilizable and (A,Q) detectable to return a
-        # stabilizing K. Check rather than let a silent bad gain reach the drone.
         self._assert_solvable()
 
         self._K, self._S, self._E = ct.lqr(self._sys, self._Q, self._R)
@@ -185,8 +144,6 @@ class LQR:
         n = self.N_STATES
         ctrb_rank = np.linalg.matrix_rank(ct.ctrb(self._A, self._B))
         if ctrb_rank < n:
-            # Not fatal by itself - only the uncontrollable modes need to be
-            # stable - but it is worth knowing about before trusting the gain.
             unstable = [e for e in np.linalg.eigvals(self._A) if e.real > 1e-9]
             if unstable:
                 raise ValueError(
@@ -219,7 +176,6 @@ class LQR:
         return self._E
 
     def controlAction(self, stateVector: np.ndarray, referenceVector: np.ndarray) -> np.ndarray:
-        """u = -K (x - x_ref). Both vectors must follow IDX ordering."""
         x = np.asarray(stateVector, float).reshape(-1)
         r = np.asarray(referenceVector, float).reshape(-1)
         if x.size != self.N_STATES or r.size != self.N_STATES:
