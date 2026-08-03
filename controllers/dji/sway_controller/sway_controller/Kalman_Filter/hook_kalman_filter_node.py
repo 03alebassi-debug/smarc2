@@ -86,8 +86,6 @@ def _run_identification_action(node: Node, robot_name: str,
         node.get_logger().warning(f'Action server {action_name} not available after {timeout_sec}s')
         return False
 
-    # Feedback is progress reporting only - it cannot carry the result. See
-    # _wait_for_identified_params for why.
     def _on_feedback(fb):
         node.get_logger().info(f'[identification] {fb.feedback.feedback.data}',
                                throttle_duration_sec=1.0)
@@ -133,13 +131,6 @@ def main():
     node.declare_parameter("loop_freq", 50)
     node.declare_parameter("L", -1.0)
     node.declare_parameter("xi", -1.0)
-    # Process-noise density. MUST be rescaled whenever the tick rate changes:
-    # the dt^3/3 position term in Q accumulates to qc*dt^2/3 per second, so it
-    # scales as dt^2 while the velocity term is rate-invariant. Scale by
-    # (dt_old/dt_new)^2 to keep the same effective position uncertainty.
-    #   3Hz  -> qc 0.01   |  20Hz -> qc 0.5  (44x)  |  50Hz -> qc 3.1  (6.25x)
-    # Too small and the filter is over-confident: Sigma stays tight, S shrinks,
-    # the Mahalanobis gate starts rejecting good detections and K -> 0.
     node.declare_parameter("qc", 3.1)
     node.declare_parameter("sigma_initial", 1.0)
     node.declare_parameter("mahalanobis_thr", 16.0)
@@ -204,10 +195,6 @@ def main():
                     xi = identified[1]
                 node.get_logger().info(f'Using identified L={L}, xi={xi} from the action')
             else:
-                # Deliberately fatal. There is no file fallback any more, and
-                # running on placeholder values would silently mistune BOTH the
-                # estimator and - via hook_pendulum_params - the controller,
-                # which is worse than not starting at all.
                 node.get_logger().error(
                     'estimate_length_and_damping did not return usable L/xi '
                     f'(action ok={ok}, params={identified}). Not starting the filter: '

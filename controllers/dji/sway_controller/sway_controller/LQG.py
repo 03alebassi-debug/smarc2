@@ -125,9 +125,6 @@ class LQR:
             [0,   -dy,   0  ],
         ], dtype=float)
 
-        # Full state out, plus the hook's cartesian offset/velocity (L*theta,
-        # L*omega under the same small-angle assumption the model itself makes)
-        # for logging and for comparing against hook_state.
         C = np.zeros((14, self.N_STATES))
         for r, s in [(0,0),(1,1),(2,2),(3,3),(4,4),(5,5),(6,6),(7,8),(8,7),(9,9)]:
             C[r, s] = 1.0

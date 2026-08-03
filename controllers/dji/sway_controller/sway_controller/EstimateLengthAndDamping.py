@@ -94,12 +94,6 @@ class EstimateLengthAndDamping:
             TwistStamped, self._robot_name + '/' + DJITopics.VELOCITY_SETPOINT_TOPIC, qos_profile=qos_best_effort10
         )
 
-        # The identification result. This topic - not the action Result and not
-        # the feedback - is how L/xi leave this node: BaseAction's Result is
-        # only `bool success`, and GentlerActionServer publishes feedback ONLY
-        # while _loop_inner returns None, so the moment _finalize() returns True
-        # the action completes and no final feedback is ever sent. Latched
-        # (TRANSIENT_LOCAL) so a consumer that subscribes afterwards still gets it.
         qos_latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                                  durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
         self._params_publisher = self._node.create_publisher(
@@ -171,10 +165,7 @@ class EstimateLengthAndDamping:
         self._reset_period_estimation()
 
     def _give_feedback(self) -> str:
-        # Once finished, the feedback carries the RESULT as JSON. BaseAction's
-        # Result is only `bool success`, so this string is the only channel that
-        # can return L/xi to the caller in-band; hook_kalman_filter_node parses
-        # it instead of round-tripping through the yaml file.
+        
         if self._finalized:
             return json.dumps(self._result)
         if self._phase == _Phase.CAPTURE_EQUILIBRIUM:

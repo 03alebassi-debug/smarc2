@@ -145,11 +145,6 @@ class HookKalmanFilter:
         self._hook_raw_meas_pub = self._node.create_publisher(Odometry, _hook_raw_meas_topic, qos_best_effort10)
         self._node.get_logger().info(f'Publishing raw hook measurement on:{_hook_raw_meas_topic}')
 
-        # The identified pendulum, latched (TRANSIENT_LOCAL) so any consumer -
-        # notably alars_move_to_dumped_action_server, which needs L/xi to build
-        # ZVD and the LQR - receives the last value even if it subscribes long
-        # after this was published. This is now the ONLY way the identified
-        # pendulum reaches consumers - there is no file any more.
         qos_latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                                  durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
         _params_topic:str = self._robot_name + '/hook_pendulum_params'
@@ -447,8 +442,6 @@ class HookKalmanFilter:
             self._node.get_logger().warning('No Odometry msg recieved yet. Skipping the update')
             return
 
-        # Re-discretize every tick using the actual elapsed dt, rather than a
-        # fixed Ad/Bd computed once for the nominal loop period.
         discrete_ss = ct.c2d(ct.ss(self._Ac, self._Bc, self._Cd, self._Dc), dt, 'zoh')
         Ad:np.ndarray = np.asarray(discrete_ss.A)
         Bd:np.ndarray = np.asarray(discrete_ss.B)
