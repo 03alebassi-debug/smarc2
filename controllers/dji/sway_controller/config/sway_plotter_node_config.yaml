@@ -1,0 +1,7 @@
+/**:
+  ros__parameters:
+    plot_output_dir: /home/aleba/sway_plots
+    ground_truth_topic: hook_ground_truth_base_flat
+    # Only drawn as a band on swing.png. Keep it equal to the action server's
+    # stabilize_theta_tol or the band means nothing.
+    theta_tol: 0.02

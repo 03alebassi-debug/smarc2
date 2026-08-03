@@ -7,15 +7,12 @@ import control as ct
 import numpy as np
 import rclpy
 from ament_index_python.packages import get_package_share_directory
-from nav_msgs.msg import Odometry
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, QoSDurabilityPolicy
-from rclpy.signals import SignalHandlerOptions
 from smarc_msgs.action import BaseAction
 from std_msgs.msg import String, Float64MultiArray
 
-from sway_controller.Kalman_Filter.ekf_ground_truth_plotter import save_all_plots
 from sway_controller.HookKalmanFilter import HookKalmanFilter
 
 
@@ -40,7 +37,7 @@ def _load_identified_gains(model_path: str):
     return k_x, tau_x, k_y, tau_y
 
 
-def _wait_for_identified_params(node: Node, robot_name: str,
+def _wait_for_identified_params(node: Node,
                                 timeout_sec: float = 5.0) -> "tuple[float, float]|None":
     """Read the L/xi that estimate_length_and_damping latched.
 
@@ -60,7 +57,7 @@ def _wait_for_identified_params(node: Node, robot_name: str,
             received['xi'] = float(msg.data[1])
 
     sub = node.create_subscription(
-        Float64MultiArray, f'{robot_name}/hook_pendulum_params_identified', _cb, qos_latched)
+        Float64MultiArray, 'hook_pendulum_params_identified', _cb, qos_latched)
     deadline = time.time() + timeout_sec
     while time.time() < deadline and not received:
         rclpy.spin_once(node, timeout_sec=0.05)
@@ -71,14 +68,13 @@ def _wait_for_identified_params(node: Node, robot_name: str,
     return received['L'], received['xi']
 
 
-def _run_identification_action(node: Node, robot_name: str,
-                               timeout_sec: float = 60.0) -> bool:
+def _run_identification_action(node: Node, timeout_sec: float = 60.0) -> bool:
     """Calls estimate_length_and_damping and blocks (via spin_until_future_complete,
     since nothing is spinning the node yet at this point in startup) until it
     finishes. BaseAction's result only carries a plain bool - the actual L/xi
     values are read from the file estimate_length_and_damping_node saves on
     success, not from this action's result itself. Returns True on success."""
-    action_name = f'{robot_name}/estimate_length_and_damping'
+    action_name = 'estimate_length_and_damping'
     client = ActionClient(node, BaseAction, action_name)
 
     node.get_logger().info(f'Waiting for action server {action_name}...')
@@ -111,19 +107,8 @@ def _run_identification_action(node: Node, robot_name: str,
     return bool(response.result.success)
 
 
-def _odom_to_sample(msg: Odometry) -> dict:
-    return {
-        't': msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
-        'x': msg.pose.pose.position.x,
-        'y': msg.pose.pose.position.y,
-        'vx': msg.twist.twist.linear.x,
-        'vy': msg.twist.twist.linear.y,
-        'vz': msg.twist.twist.linear.z,
-    }
-
-
 def main():
-    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+    rclpy.init()
 
     node = Node("hook_kalman_filter_node")
 
@@ -138,35 +123,8 @@ def main():
     node.declare_parameter("max_boresight_tilt_deg", 45.0)
     
     node.declare_parameter("continuous_model_path", "")
-    node.declare_parameter("ground_truth_topic", "hook_ground_truth_base_flat")
-    node.declare_parameter("plot_output_dir", "/home/aleba/ekf_plots")
 
     robot_name = node.get_parameter("robot_name").value
-
-    ground_truth_topic = node.get_parameter("ground_truth_topic").value
-    plot_output_dir = node.get_parameter("plot_output_dir").value
-
-    gt_samples: list = []
-    est_samples: list = []
-    raw_samples: list = []
-    L = None
-
-    qos_best_effort10 = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,
-                                    durability=QoSDurabilityPolicy.VOLATILE)
-
-    node.create_subscription(
-        Odometry, f'{robot_name}/{ground_truth_topic}',
-        lambda msg: gt_samples.append(_odom_to_sample(msg)), 10
-    )
-    node.create_subscription(
-        Odometry, f'{robot_name}/hook_state',
-        lambda msg: est_samples.append(_odom_to_sample(msg)), qos_best_effort10
-    )
-    
-    node.create_subscription(
-        Odometry, f'{robot_name}/hook_raw_measurement',
-        lambda msg: raw_samples.append(_odom_to_sample(msg)), qos_best_effort10
-    )
 
     try:
         continuous_model_path = node.get_parameter("continuous_model_path").value
@@ -186,8 +144,8 @@ def main():
         L = node.get_parameter("L").value
         xi = node.get_parameter("xi").value
         if L < 0 or xi < 0:
-            ok = _run_identification_action(node, robot_name)
-            identified = _wait_for_identified_params(node, robot_name) if ok else None
+            ok = _run_identification_action(node)
+            identified = _wait_for_identified_params(node) if ok else None
             if identified is not None and identified[0] > 0.0:
                 if L < 0:
                     L = identified[0]
@@ -226,10 +184,7 @@ def main():
 
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info('Ctrl+C received - generating comparison plots before shutdown...')
-        ok, message = save_all_plots(gt_samples, est_samples, plot_output_dir, robot_name,
-                                     L=L, raw_samples=raw_samples)
-        node.get_logger().info(message) if ok else node.get_logger().warning(message)
+        pass
     finally:
         node.destroy_node()
         if rclpy.ok():

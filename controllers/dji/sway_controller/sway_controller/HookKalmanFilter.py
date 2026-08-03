@@ -137,27 +137,27 @@ class HookKalmanFilter:
         qos_best_effort10 = QoSProfile(depth=10, 
                                                reliability=ReliabilityPolicy.BEST_EFFORT, 
                                                durability=QoSDurabilityPolicy.VOLATILE)
-        _hook_state_topic:str = self._robot_name + '/hook_state'
+        _hook_state_topic:str = 'hook_state'
         self._hook_state_pub = self._node.create_publisher(Odometry, _hook_state_topic, qos_best_effort10)
         self._node.get_logger().info(f'Publishing hook state on:{_hook_state_topic}')
 
-        _hook_raw_meas_topic:str = self._robot_name + '/hook_raw_measurement'
+        _hook_raw_meas_topic:str = 'hook_raw_measurement'
         self._hook_raw_meas_pub = self._node.create_publisher(Odometry, _hook_raw_meas_topic, qos_best_effort10)
         self._node.get_logger().info(f'Publishing raw hook measurement on:{_hook_raw_meas_topic}')
 
         qos_latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                                  durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
-        _params_topic:str = self._robot_name + '/hook_pendulum_params'
+        _params_topic:str = 'hook_pendulum_params'
         self._pendulum_params_pub = self._node.create_publisher(
             Float64MultiArray, _params_topic, qos_latched)
         self._node.get_logger().info(f'Publishing identified pendulum params on:{_params_topic}')
 
-        _hook_swing_topic:str = self._robot_name + '/hook_swing_state'
+        _hook_swing_topic:str = 'hook_swing_state'
         self._hook_swing_pub = self._node.create_publisher(JointState, _hook_swing_topic, qos_best_effort10)
         self._node.get_logger().info(f'Publishing hook swing state on:{_hook_swing_topic}')
 
     def _create_node_subscriptions(self):
-        _detection_topic_name:str = self._robot_name + '/' + Topics.LABELED_OBBS_TOPIC
+        _detection_topic_name:str = Topics.LABELED_OBBS_TOPIC
         self._detection_subscription = self._node.create_subscription(LabeledOBBs, 
                                                                       _detection_topic_name, 
                                                                       self._detection_callback, 
@@ -168,7 +168,7 @@ class HookKalmanFilter:
                                        reliability=ReliabilityPolicy.BEST_EFFORT, 
                                        durability=QoSDurabilityPolicy.VOLATILE)
 
-        _cmd_vel_topic:str = self._robot_name + '/' + 'cmd_vel_drone_frame'
+        _cmd_vel_topic:str = 'cmd_vel_drone_frame'
         self._cmd_vel_subscriber = self._node.create_subscription(Vector3Stamped, 
                                                                   _cmd_vel_topic, 
                                                                   self._cmd_vel_callback, 
@@ -176,14 +176,14 @@ class HookKalmanFilter:
         self._node.get_logger().info(f'Succesfully subscribed to:{_cmd_vel_topic}')
 
         # Correct info from topic 
-        _camera_info_topic:str = self._robot_name + '/' + Topics.GIMBAL_CAMERA_INFO_TOPIC
+        _camera_info_topic:str = Topics.GIMBAL_CAMERA_INFO_TOPIC
         self._camera_info_subscription = self._node.create_subscription(CameraInfo,
                                                                         _camera_info_topic,
                                                                         self._camera_info_callback,
                                                                         10)
         self._node.get_logger().info(f'Succesfully subscribed to:{_camera_info_topic}')
 
-        _odom_topic:str = self._robot_name + '/smarc/odom'
+        _odom_topic:str = 'smarc/odom'
         self._odom_subscription = self._node.create_subscription(Odometry,
                                                                  _odom_topic,
                                                                  self._odom_callback,

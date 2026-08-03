@@ -36,21 +36,21 @@ class HookGroundTruthComparator:
 
         self._gt_sub = self._node.create_subscription(
             Odometry,
-            self._robot_name + '/' + ground_truth_topic,
+            ground_truth_topic,
             self._ground_truth_callback,
             10
         )
         self._node.get_logger().info(
-            f'Subscribed to:{self._robot_name}/{ground_truth_topic}'
+            f'Subscribed to:{ground_truth_topic}'
         )
 
         self._out_pub = self._node.create_publisher(
             Odometry,
-            self._robot_name + '/' + output_topic,
+            output_topic,
             10
         )
         self._node.get_logger().info(
-            f'Publishing transformed ground truth on:{self._robot_name}/{output_topic}'
+            f'Publishing transformed ground truth on:{output_topic}'
         )
 
     def _ground_truth_callback(self, msg: Odometry):

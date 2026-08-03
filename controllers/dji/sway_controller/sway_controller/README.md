@@ -29,8 +29,20 @@ linearised about hanging straight down. Everything lives in
                                           PathParametrizer -> ZVD -> LQR
                                                         │
                                                         v
-                                               velocity setpoint
+                                               velocity setpoint (cmd_vel)
+
+   everything above ─────────────> sway_plotter_node ──> PNGs
 ```
+
+**No node in this pipeline plots anything.** `sway_plotter_node` subscribes to
+the topics above and writes every PNG itself, so plotting can be left out, moved
+or restarted without touching the estimator or the controller, and nothing that
+flies the drone imports matplotlib.
+
+All names here are **relative**: the nodes are launched into the `/<robot>`
+namespace (`ros2 launch sway_controller <node>_launch.py robot_name:=M350`),
+never with `ros2 run`. TF frame ids are the exception - they still carry the
+`<robot>/` prefix, because frames are not namespaced.
 
 `u = v_feedforward(ZVD) + trim(LQR)` — **the LQR corrects the plan, it never
 replaces it.** A persistently large trim means the plan and the plant disagree
@@ -89,6 +101,29 @@ up fitting the un-excited, noise-dominated one.
 The result leaves via the **latched topic**, not the action Result: `BaseAction`'s
 Result is only `bool success`, *and* `GentlerActionServer` publishes feedback
 only while `_loop_inner` returns `None`, so no final feedback is ever emitted.
+
+### `SwayPlotter.py` + `sway_plotter_node.py`
+The only plotting node. Records `hook_ground_truth_base_flat`, `hook_state`,
+`hook_raw_measurement`, `hook_swing_state`, `cmd_vel`, `smarc/odom` and the
+latched `hook_pendulum_params`, and writes:
+
+| directory | plots |
+|---|---|
+| `<plot_output_dir>/estimator/` | `position_comparison`, `velocity_comparison`, `raw_measurement_vs_gt`, `diagnostics` |
+| `<plot_output_dir>/control/`   | `swing`, `command`, `trajectory` |
+
+Written on Ctrl+C, or on demand without stopping the recording:
+
+```bash
+ros2 service call /M350/save_sway_plots std_srvs/srv/Trigger
+```
+
+`raw_measurement_vs_gt.png` is the one to read first: a bad `hook_state` with a
+good raw measurement is a fusion/tuning problem, never a sensing one.
+
+The figures themselves live in `ekf_ground_truth_plotter.py` (estimate vs ground
+truth) and `control_plotter.py` (swing, command, trajectory) - plain matplotlib,
+no rclpy, so they can be reused on data from a bag.
 
 ### `HookKalmanFilter.py`
 4-state `[θx, ωx, θy, ωy]` KF. Prediction is **re-discretized every tick with

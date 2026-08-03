@@ -1,3 +1,6 @@
+import os
+from glob import glob
+
 from setuptools import find_packages, setup
 
 package_name = 'sway_controller'
@@ -10,6 +13,9 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        
+        (os.path.join('share', package_name, 'launch'), glob('launch/*launch.py')),
+        (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
     ],
     install_requires=['setuptools', 'numpy', 'simpy', 'PyYAML', 'control'],
     zip_safe=True,
@@ -27,6 +33,7 @@ setup(
             'hook_kalman_filter_node = sway_controller.Kalman_Filter.hook_kalman_filter_node:main',
             'hook_ground_truth_comparator_node = sway_controller.Kalman_Filter.hook_ground_truth_comparator_node:main',
             'estimate_length_and_damping_node = sway_controller.Kalman_Filter.estimate_length_and_damping_node:main',
+            'sway_plotter_node = sway_controller.sway_plotter_node:main',
         ],
     },
 )

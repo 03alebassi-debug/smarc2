@@ -23,9 +23,8 @@ from dji_msgs.msg import Links  as DJILinks
 
 import traceback
 import time
-import os
 
-from sway_controller import PathParametrizer, ZVD, LQR, save_mission_plots
+from sway_controller import PathParametrizer, ZVD, LQR
 
 G = 9.81
 
@@ -48,8 +47,6 @@ class MoveToDumpedAction():
         self._create_subscriptions()
 
         self._phase:str = 'MOVING'
-        self._mission_samples:list = []
-        self._goal_received_time:float = 0.0
 
         self._goal_in_map:None|PoseStamped = None
         self._distance_from_goal:None|float = None
@@ -117,8 +114,6 @@ class MoveToDumpedAction():
         node.declare_parameter('stabilize_theta_max', 0.3, double_desc)     # rad
         node.declare_parameter('stabilize_position_max', 2.0, double_desc)  # m
 
-        node.declare_parameter('plot_missions', True, bool_desc)
-        node.declare_parameter('plot_output_dir', '/home/aleba/move_to_dumped_plots', string_desc)
 
     def _get_node_parameters(self):
         self._declare_parameters()
@@ -166,8 +161,6 @@ class MoveToDumpedAction():
         self._stabilize_rho = self._node.get_parameter('stabilize_rho').get_parameter_value().double_value
         self._stabilize_theta_max = self._node.get_parameter('stabilize_theta_max').get_parameter_value().double_value
         self._stabilize_position_max = self._node.get_parameter('stabilize_position_max').get_parameter_value().double_value
-        self._plot_missions = self._node.get_parameter('plot_missions').get_parameter_value().bool_value
-        self._plot_output_dir = self._node.get_parameter('plot_output_dir').get_parameter_value().string_value
 
     def _refresh_tuning_parameters(self):
         """Re-read the LQG tuning knobs from the parameter server.
@@ -285,8 +278,8 @@ class MoveToDumpedAction():
                                                                      DJITopics.VELOCITY_SETPOINT_TOPIC, 
                                                                      qos_profile=qos_best_effort10)
 
-        self.drone_frame_ref_publisher = self._node.create_publisher(Vector3Stamped, 
-                                                                     'cmd_vel_drone_frame', 
+        self.drone_frame_ref_publisher = self._node.create_publisher(Vector3Stamped,
+                                                                     'cmd_vel_drone_frame',
                                                                      qos_profile=qos_best_effort10)
 
 
@@ -403,8 +396,6 @@ class MoveToDumpedAction():
                            if (self._stabilize_before_mission and self._lqr_stabilize is not None)
                            else 'MOVING')
             self._stabilize_started = self.now_time
-            self._goal_received_time = self.now_time
-            self._mission_samples = []
             self._within_tol_since:None|float = None
             self._hold_position_map:None|np.ndarray = None
 
@@ -422,7 +413,6 @@ class MoveToDumpedAction():
     
     def _on_cancel_received(self) -> bool:
         self.log('Cancel requested, stopping...')
-        self._save_mission_plots('CANCELLED')
         self._goal_in_map = None
         return True
     
@@ -570,8 +560,6 @@ class MoveToDumpedAction():
                     'Could not stabilise (no usable swing estimate) - starting the mission anyway'
                 )
                 self._begin_mission()
-            self._record_sample('STABILIZING', self._hold_position_map[:2],
-                                (0.0, 0.0), None, np.zeros(2))
             self._publish_velocity(np.zeros(2))
             return None
 
@@ -607,51 +595,8 @@ class MoveToDumpedAction():
             f'omega=[{omega[0]:+.4f},{omega[1]:+.4f}]rad/s u=[{u[0]:+.3f},{u[1]:+.3f}]m/s',
             throttle_duration_sec=1.0
         )
-        self._record_sample('STABILIZING', self._hold_position_map[:2],
-                            (0.0, 0.0), u, u[:2])
         self._publish_velocity(u[:2])
         return None
-
-    def _record_sample(self, phase:str, p_ref_map, v_ff_bf, trim, u_published):
-        """One row per control tick, for the end-of-mission plots. Recorded even
-        when there is no swing estimate (NaN), so a gap in the plot is visible
-        rather than silently interpolated over."""
-        if not self._plot_missions:
-            return
-
-        drone = self._drone_state.drone_in_map_numpy
-        nan = float('nan')
-        th = self._swing_state.position if self._swing_state is not None else (nan, nan)
-        om = self._swing_state.velocity if self._swing_state is not None else (nan, nan)
-
-        self._mission_samples.append({
-            't': self.now_time - self._goal_received_time,
-            'phase': phase,
-            'theta_x': float(th[0]), 'theta_y': float(th[1]),
-            'omega_x': float(om[0]), 'omega_y': float(om[1]),
-            'p_x': float(drone[0]) if drone is not None else nan,
-            'p_y': float(drone[1]) if drone is not None else nan,
-            'p_ref_x': float(p_ref_map[0]), 'p_ref_y': float(p_ref_map[1]),
-            'v_ff_x': float(v_ff_bf[0]), 'v_ff_y': float(v_ff_bf[1]),
-            'trim_x': float(trim[0]) if trim is not None else nan,
-            'trim_y': float(trim[1]) if trim is not None else nan,
-            'u_x': float(u_published[0]), 'u_y': float(u_published[1]),
-        })
-
-    def _save_mission_plots(self, outcome:str):
-        if not self._plot_missions or not self._mission_samples:
-            return
-        try:
-            ok, message = save_mission_plots(
-                self._mission_samples, self._plot_output_dir, self._robot_name,
-                theta_tol=self._stabilize_theta_tol,
-            )
-            self.log(f'[{outcome}] {message}') if ok else self._node.get_logger().warning(message)
-        except Exception as e:
-            # Never let plotting take down a mission result.
-            self._node.get_logger().warning(f'Failed to save mission plots: {e}')
-        finally:
-            self._mission_samples = []
 
     def _begin_mission(self):
         """Restart the mission clock. The path is parametrised from t=0, so the
@@ -663,8 +608,10 @@ class MoveToDumpedAction():
                        + self.Ti[-1] + self._sattle_extra)
 
     def _publish_velocity(self, u_xy:np.ndarray) -> np.ndarray:
-        """Publishes and returns what was ACTUALLY sent, so the plots show the
-        real command rather than a pre-saturation value that never existed."""
+        """Publishes and returns what was ACTUALLY sent - the saturated command,
+        not the pre-saturation value that never left this node. Anything
+        inspecting the command (sway_plotter_node included) reads it off
+        cmd_vel / cmd_vel_drone_frame."""
         speed = float(np.linalg.norm(u_xy))
         if speed > self._max_speed:
             u_xy = u_xy * (self._max_speed / speed)
@@ -700,7 +647,6 @@ class MoveToDumpedAction():
 
         if self._distance_from_goal < self._goal_tolerance:
             self.log(f'Goal reaced withing tolerance {self._goal_tolerance}, return SUCCESS')
-            self._save_mission_plots('SUCCESS')
             return True
         #self.log(f'Distance remaining: {self._distance_from_goal:.2f}')
 
@@ -709,7 +655,6 @@ class MoveToDumpedAction():
 
         if now > self._t_end:
             self._node.get_logger().error('Goal not reached within mission time, return FAILURE')
-            self._save_mission_plots('FAILURE')
             return False
 
         position_references, velocity_references = self.zvd.shapeReferences(
@@ -741,10 +686,7 @@ class MoveToDumpedAction():
         if correction is not None:
             u = u + correction[:2]
 
-        u_published = self._publish_velocity(u)
-        self._record_sample('MOVING', position_references,
-                            (vel_in_base_flat.vector.x, vel_in_base_flat.vector.y),
-                            correction, u_published)
+        self._publish_velocity(u)
 
         self._node.get_logger().info(
             f'[debug] v_base_flat published (pre-saturation): [{u[0]:+.3f}, {u[1]:+.3f}]',

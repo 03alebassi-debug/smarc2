@@ -23,27 +23,6 @@ class _Phase(Enum):
 
 
 class EstimateLengthAndDamping:
-    """Action server that identifies the hook's effective pendulum length (L)
-    and damping ratio (xi): commands a short velocity step to excite a swing,
-    then fits the free-decay oscillation observed via YOLO hook detections.
-    Meant to be run once, to obtain real L/xi values
-    instead of hand-picked guesses.
-
-    Action: "estimate_length_and_damping" (smarc_msgs/action/BaseAction, JSON goal/result)
-
-    Goal fields (all optional):
-        excitation_speed    (float, m/s, default 1.0)
-        excitation_duration (float, s,   default 2.0)
-        collection_duration (float, s,   default 20.0)  - max time to observe decay
-        min_periods         (int,        default 4)      - stop early once this many periods are seen
-        refractory_window   (float, s,   default 1.5)    - minimum spacing between accepted extrema
-        smoothing_window    (int,        default 5)      - moving-average window (in samples) applied
-                                                             to the raw measurement before extremum detection,
-                                                             to reject detection jitter mistaken for real swings
-
-    Result fields:
-        success (bool), length (float, m), damping (float), message (str)
-    """
 
     G = 9.81
 
@@ -53,10 +32,10 @@ class EstimateLengthAndDamping:
 
         self.BASE_FLAT_FRAME: str = self._robot_name + '/' + DJILinks.BASE_FLAT
 
-        self._last_x: "float|None" = None   # image horizontal
-        self._last_y: "float|None" = None   # image vertical
-        self._new_detection: bool = False   # set by _detection_callback, consumed once
-        self._axis_index: "int|None" = None  # 0 = horizontal, 1 = vertical
+        self._last_x: "float|None" = None   
+        self._last_y: "float|None" = None   
+        self._new_detection: bool = False   
+        self._axis_index: "int|None" = None  
         self._axis_buffer: "list[tuple[float, float, float]]" = []
 
         self._create_subscriptions()
@@ -64,7 +43,7 @@ class EstimateLengthAndDamping:
 
         self._as = GentlerActionServer(
             self._node,
-            self._robot_name + '/estimate_length_and_damping',
+            'estimate_length_and_damping',
             self._on_goal_received,
             self._on_cancel_received,
             self._prepare_loop,
@@ -82,7 +61,7 @@ class EstimateLengthAndDamping:
         self._node.get_logger().info(msg)
 
     def _create_subscriptions(self):
-        _detection_topic_name = self._robot_name + '/' + DJITopics.LABELED_OBBS_TOPIC
+        _detection_topic_name = DJITopics.LABELED_OBBS_TOPIC
         self._detection_subscription = self._node.create_subscription(
             LabeledOBBs, _detection_topic_name, self._detection_callback, 10
         )
@@ -91,13 +70,13 @@ class EstimateLengthAndDamping:
         qos_best_effort10 = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,
                                         durability=QoSDurabilityPolicy.VOLATILE)
         self._ref_publisher = self._node.create_publisher(
-            TwistStamped, self._robot_name + '/' + DJITopics.VELOCITY_SETPOINT_TOPIC, qos_profile=qos_best_effort10
+            TwistStamped, DJITopics.VELOCITY_SETPOINT_TOPIC, qos_profile=qos_best_effort10
         )
 
         qos_latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                                  durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
         self._params_publisher = self._node.create_publisher(
-            Float64MultiArray, self._robot_name + '/hook_pendulum_params_identified',
+            Float64MultiArray, 'hook_pendulum_params_identified',
             qos_profile=qos_latched
         )
 
@@ -107,8 +86,7 @@ class EstimateLengthAndDamping:
                           MultiArrayDimension(label='damping', size=1, stride=1)]
         msg.data = [float(length), float(xi)]
         self._params_publisher.publish(msg)
-        self.log(f'Published identified params on '
-                 f'{self._robot_name}/hook_pendulum_params_identified')
+        self.log('Published identified params on hook_pendulum_params_identified')
 
     def _detection_callback(self, msg):
         hook_indices = [i for i, cls_id in enumerate(msg.ids) if cls_id == "hook"]
@@ -242,17 +220,6 @@ class EstimateLengthAndDamping:
 
 
     def _select_axis(self):
-        """Decide which image axis the swing is actually on, from the first
-        `axis_selection_duration` of free decay, then replay that buffer through
-        the extremum detector so nothing is lost.
-
-        Measured from the data rather than hardcoded: the image->body mapping
-        depends on the gimbal's current orientation (with it pointed down,
-        image-horizontal is body Y and image-vertical is body X), so the axis the
-        excitation lands on is not fixed. Picking the quieter axis is not a small
-        error - in the test run its swing was ~60x smaller than the excited one
-        and sat right at the detection noise floor (SNR ~1), so the period fit
-        would be measuring noise."""
         if not self._axis_buffer:
             self._axis_index = 0
             self._equilibrium = self._last_x
@@ -336,10 +303,7 @@ class EstimateLengthAndDamping:
             self.log(f'Period #{self._n_periods}: {period:.3f}s, running average: {self._period_estimate:.3f}s')
 
     def _estimate_damping(self, wn: float) -> float:
-        """The decaying-amplitude envelope |x(t) - centre| = A0*exp(-xi*wn*t)
-        passes through *every* extremum (peaks and troughs alike), so fit it via
-        linear regression of ln(amplitude) vs time across all collected extrema
-        rather than a single peak-to-peak ratio. Slope of that fit = -xi*wn."""
+        
         if len(self._extrema) < 3:
             return 0.0
 
