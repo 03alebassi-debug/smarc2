@@ -133,7 +133,14 @@ def main():
     node.declare_parameter("loop_freq", 50)
     node.declare_parameter("L", -1.0)
     node.declare_parameter("xi", -1.0)
-    node.declare_parameter("qc", 0.01)
+    # Process-noise density. MUST be rescaled whenever the tick rate changes:
+    # the dt^3/3 position term in Q accumulates to qc*dt^2/3 per second, so it
+    # scales as dt^2 while the velocity term is rate-invariant. Scale by
+    # (dt_old/dt_new)^2 to keep the same effective position uncertainty.
+    #   3Hz  -> qc 0.01   |  20Hz -> qc 0.5  (44x)  |  50Hz -> qc 3.1  (6.25x)
+    # Too small and the filter is over-confident: Sigma stays tight, S shrinks,
+    # the Mahalanobis gate starts rejecting good detections and K -> 0.
+    node.declare_parameter("qc", 3.1)
     node.declare_parameter("sigma_initial", 1.0)
     node.declare_parameter("mahalanobis_thr", 16.0)
     
@@ -145,11 +152,6 @@ def main():
 
     robot_name = node.get_parameter("robot_name").value
 
-    # Recording is set up before identification even starts (not just before the
-    # final spin), and L is bound before entering the try block - so a Ctrl+C at
-    # *any* point below (identification included) hits the except clause cleanly
-    # with well-defined variables, instead of crashing with a raw traceback and
-    # nothing saved.
     ground_truth_topic = node.get_parameter("ground_truth_topic").value
     plot_output_dir = node.get_parameter("plot_output_dir").value
 
