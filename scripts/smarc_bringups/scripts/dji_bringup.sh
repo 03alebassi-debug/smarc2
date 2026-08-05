@@ -219,9 +219,11 @@ row(
 if [[ "$NO_CAM" == "True" ]]; then
     ESTIMATE_LENGTH_AND_DAMPING_CMD="echo 'Camera disabled, not launching estimate_length_and_damping_node'"
 else
-    ESTIMATE_LENGTH_AND_DAMPING_CMD="ros2 run sway_controller estimate_length_and_damping_node --ros-args \
-    -p robot_name:=$ROBOT_NAME \
-    -p use_sim_time:=$USE_SIM_TIME"
+    # Launched, not `ros2 run`: sway_controller's nodes use plain relative
+    # topic/action names and need the /$ROBOT_NAME namespace the launch sets.
+    ESTIMATE_LENGTH_AND_DAMPING_CMD="ros2 launch sway_controller estimate_length_and_damping_node_launch.py \
+robot_name:=$ROBOT_NAME \
+use_sim_time:=$USE_SIM_TIME"
 fi
 
 tmux_make_layout "$SESSION" EstimateLengthAndDamping "

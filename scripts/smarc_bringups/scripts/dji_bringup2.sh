@@ -19,6 +19,9 @@
 #   - gimbal action server             - and a ready-made "point down" command
 #   - estimate_length_and_damping_node - action server the filter calls at boot
 #   - hook_ground_truth_comparator_node- republishes Unity GT into base_flat_link
+#   - sway_plotter_node                - the ONLY node that plots; records the
+#                                        estimator and controller topics and
+#                                        writes every PNG on Ctrl+C
 #
 # NOT launched (present in dji_bringup.sh): behaviour trees, WASP/wara-ps,
 # mqtt bridge + mosquitto, rosboard, geofence / log / wait / internet checker,
@@ -34,13 +37,17 @@
 # Order of operations for a damped mission:
 #   1. Captain up, drone flying, gimbal pointed down (Gimbal window).
 #   2. Start hook_kalman_filter_node (Hook window). It runs the identification
-#      itself on startup - which EXCITES a swing - and writes
-#      ~/.ros/hook_pendulum_params_<robot>.yaml.
+#      itself on startup - which EXCITES a swing - and publishes L/xi on the
+#      latched <robot>/hook_pendulum_params topic.
 #   3. Send a move_to_dumped goal. Run open loop first with
 #      ENABLE_LQG=False ./dji_bringup2.sh M350 5.0
-#      It reads that yaml, stabilises the payload
-#      first, then flies the shaped+damped trajectory, and writes plots to
-#      /home/aleba/move_to_dumped_plots when the mission ends.
+#      It reads that topic, stabilises the payload first, then flies the
+#      shaped+damped trajectory.
+#   4. For plots: Ctrl+C the sway_plotter_node pane (Hook window) once the
+#      mission is over. It writes <PLOT_OUTPUT_DIR>/estimator/*.png and
+#      <PLOT_OUTPUT_DIR>/control/*.png, default /home/aleba/sway_plots.
+#      `ros2 service call /<robot>/save_sway_plots std_srvs/srv/Trigger` does
+#      the same without stopping the recording.
 #
 #   ros2 action send_goal /<robot>/move_to_dumped smarc_msgs/action/BaseAction \
 #     '{goal: {data: "{\"waypoint\": {\"latitude\": 59.30651, \"longitude\": 18.70958, \"altitude\": 5.25, \"tolerance\": 0.5}}"}}' --feedback
@@ -133,11 +140,7 @@ if tmux has-session -t "${ROBOT_NAME}_bringup" 2>/dev/null; then
 fi
 
 
-if [[ "$(whoami)" == *"alars"* ]]; then
-    USE_SIM_TIME=False
-else
     USE_SIM_TIME=True
-fi
 
 ########
 # PARAMS
@@ -227,10 +230,10 @@ fi
 # 3 The two move actions
 #   - move_to        : plain, unshaped. Used to EXCITE the swing for testing.
 #   - move_to_dumped : the sway-damped mission (ZVD feedforward + LQG trim).
-#     It reads the identified L/xi from
-#     ~/.ros/hook_pendulum_params_$ROBOT_NAME.yaml when a goal arrives, so
+#     It reads the identified L/xi off the latched
+#     /$ROBOT_NAME/hook_pendulum_params topic when a goal arrives, so
 #     hook_kalman_filter_node (Hook window) must have run its identification
-#     first - otherwise it silently falls back to L=10.0, xi=0.1.
+#     first - otherwise it waits 30s and REJECTS the goal rather than guessing.
 ############
 ALARS_MOVE_TO_CMD="ros2 run alars alars_move_to_action_server --ros-args -r __ns:=/$ROBOT_NAME \
 -p robot_name:=$ROBOT_NAME \
@@ -350,37 +353,52 @@ GIMBAL_DOWN_CMD="ros2 topic pub -r 2 -t 10 /$ROBOT_NAME/gimbal_camera/gimbal_cmd
 
 
 ############
-# 6 Hook - sysid server + ground truth, filter left for you to start
+# 6 Hook - sysid server + ground truth + plotter, filter left for you to start
 ############
+# All sway_controller nodes are LAUNCHED (not `ros2 run`) so they land in the
+# /$ROBOT_NAME namespace: their topic and action names are plain relative names,
+# the same convention as the alars action servers.
 if [[ "$NO_CAM" == "True" ]]; then
     ESTIMATE_LENGTH_AND_DAMPING_CMD="echo 'Camera disabled, not launching estimate_length_and_damping_node'"
 else
     # This is an action SERVER - it must already be running when you start the
     # filter, because hook_kalman_filter_node calls it (blocking) at startup to
     # get L/xi unless you override both.
-    ESTIMATE_LENGTH_AND_DAMPING_CMD="ros2 run sway_controller estimate_length_and_damping_node --ros-args \
-    -p robot_name:=$ROBOT_NAME \
-    -p use_sim_time:=$USE_SIM_TIME"
+    ESTIMATE_LENGTH_AND_DAMPING_CMD="ros2 launch sway_controller estimate_length_and_damping_node_launch.py \
+robot_name:=$ROBOT_NAME \
+use_sim_time:=$USE_SIM_TIME"
 fi
 
 # Needs Unity's GT_TransformOdom_Pub attached to the hook GameObject to have
 # anything to republish.
-HOOK_GT_COMPARATOR_CMD="ros2 run sway_controller hook_ground_truth_comparator_node --ros-args \
--p robot_name:=$ROBOT_NAME \
--p use_sim_time:=$USE_SIM_TIME"
+HOOK_GT_COMPARATOR_CMD="ros2 launch sway_controller hook_ground_truth_comparator_node_launch.py \
+robot_name:=$ROBOT_NAME \
+use_sim_time:=$USE_SIM_TIME"
+
+# The ONLY node that plots. It is a pure subscriber, so it can sit here for the
+# whole session: start it before the mission, then Ctrl+C this pane (or call
+# `ros2 service call /$ROBOT_NAME/save_sway_plots std_srvs/srv/Trigger`) to
+# write everything it recorded to $PLOT_OUTPUT_DIR.
+PLOT_OUTPUT_DIR=${PLOT_OUTPUT_DIR:-/home/aleba/sway_plots}
+SWAY_PLOTTER_CMD="ros2 launch sway_controller sway_plotter_node_launch.py \
+robot_name:=$ROBOT_NAME \
+use_sim_time:=$USE_SIM_TIME \
+plot_output_dir:=$PLOT_OUTPUT_DIR"
 
 tmux_make_layout "$SESSION" Hook "
 col(
     1:var(ESTIMATE_LENGTH_AND_DAMPING_CMD),
     1:var(HOOK_GT_COMPARATOR_CMD),
+    1:var(SWAY_PLOTTER_CMD),
     1:pane
 )"
 
 # Pre-typed, NOT executed - press Enter here once the drone is flying and the
-# gimbal is pointed down. Ctrl+C in this pane writes the comparison plots.
-HOOK_KF_CMD="ros2 run sway_controller hook_kalman_filter_node --ros-args \
--p robot_name:=$ROBOT_NAME \
--p use_sim_time:=$USE_SIM_TIME"
+# gimbal is pointed down. It runs the identification itself, which EXCITES a
+# swing.
+HOOK_KF_CMD="ros2 launch sway_controller hook_kalman_filter_node_launch.py \
+robot_name:=$ROBOT_NAME \
+use_sim_time:=$USE_SIM_TIME"
 
 
 # All panes exist by now; give their shells a moment to finish drawing prompts,
