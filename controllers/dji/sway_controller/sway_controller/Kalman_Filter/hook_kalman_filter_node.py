@@ -100,7 +100,6 @@ def main():
     rclpy.init()
 
     node = Node("hook_kalman_filter_node")
-
     node.declare_parameter("robot_name", "M350")
     node.declare_parameter("loop_freq", 50)
     node.declare_parameter("L", -1.0)
@@ -108,11 +107,8 @@ def main():
     node.declare_parameter("qc", 3.1)
     node.declare_parameter("sigma_initial", 1.0)
     node.declare_parameter("mahalanobis_thr", 16.0)
-    
     node.declare_parameter("max_boresight_tilt_deg", 45.0)
-    
     node.declare_parameter("continuous_model_path", "")
-
     robot_name = node.get_parameter("robot_name").value
 
     try:
@@ -144,10 +140,7 @@ def main():
             else:
                 node.get_logger().error(
                     'estimate_length_and_damping did not return usable L/xi '
-                    f'(action ok={ok}, params={identified}). Not starting the filter: '
-                    'it would have to invent a pendulum. Check that '
-                    'estimate_length_and_damping_node is running and that the hook '
-                    'is visible, or pass L and xi explicitly as parameters.'
+                    f'(action ok={ok}, params={identified}).'
                 )
                 node.destroy_node()
                 if rclpy.ok():
