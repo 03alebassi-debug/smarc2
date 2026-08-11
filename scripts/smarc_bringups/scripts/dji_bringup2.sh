@@ -278,6 +278,14 @@ LATLON_CMD="ros2 topic echo /$ROBOT_NAME/smarc/latlon --once"
 #
 # Both are kept because only the alars one publishes the auv/buoy topics that
 # auv_state_estimation's projection nodes and the alars action servers consume.
+# Intrinsics the hook filter STARTS from, until CameraInfo arrives and overrides
+# them. Set outside the NO_CAM branch on purpose: the filter is launched either
+# way, so it always needs a file to read. Lives in auv_state_estimation/config.
+CAM_CALIBRATION_FILE="z1_720p_cam_params.yaml"
+if [[ $USE_SIM_TIME = "True" ]]; then
+    CAM_CALIBRATION_FILE="sim_1080p_cam_params.yaml"
+fi
+
 if [[ "$NO_CAM" == "True" ]]; then
     YOLO_CMD="echo 'Camera disabled, not launching YOLO detector - no hook detections will exist'"
     YOLO_ROS_CMD="echo 'Camera disabled, not launching yolo_ros - yolo/detections will not exist'"
@@ -453,7 +461,8 @@ col(
 # swing.
 HOOK_KF_CMD="ros2 launch sway_controller hook_kalman_filter_node_launch.py \
 robot_name:=$ROBOT_NAME \
-use_sim_time:=$USE_SIM_TIME"
+use_sim_time:=$USE_SIM_TIME \
+camera_calibration_file:=$CAM_CALIBRATION_FILE"
 
 
 # All panes exist by now; give their shells a moment to finish drawing prompts,
