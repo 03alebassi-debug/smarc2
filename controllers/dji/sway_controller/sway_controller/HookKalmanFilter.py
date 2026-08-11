@@ -27,6 +27,7 @@ class HookKalmanFilter:
                  kx:float, ky:float, 
                  qc:float, sigma_initial:float,
                  mahalanobis_thr:float,
+                 camera_calibration_file:str,
                  max_boresight_tilt_deg:float = 45.0):
 
         self._node:Node = node
@@ -45,8 +46,7 @@ class HookKalmanFilter:
         self._loaded_camera_parameters: bool = False
 
         pkg_share = get_package_share_directory('auv_state_estimation')
-        filename = 'sim_1080p_cam_params.yaml' if use_simtime else 'z1_720p_cam_params.yaml'
-        self._camera_config_path = os.path.join(pkg_share, 'config', filename) 
+        self._camera_config_path = os.path.join(pkg_share, 'config', camera_calibration_file)
 
         self._read_camera_params()
 
