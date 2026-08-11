@@ -17,8 +17,6 @@ def generate_launch_description():
         default_value='False',
         description='Use simulation clock instead of wall clock'
     )
-    # The tunables below default to '' (empty) rather than to a value, so that
-    # anything not passed on the command line falls through to the config yaml.
     plot_output_dir_arg = DeclareLaunchArgument(
         'plot_output_dir',
         default_value='',
@@ -43,9 +41,7 @@ def generate_launch_description():
     config_file = PathJoinSubstitution([config_dir, config_file_name])
 
     def make_node(context, *args, **kwargs):
-        # A LaunchConfiguration can only be read inside a context, which is why
-        # this lives in an OpaqueFunction: an argument becomes a ROS parameter
-        # only if it was actually typed, otherwise the yaml value stands.
+        
         overrides = {}
         for name, cast in (('plot_output_dir', str),
                            ('ground_truth_topic', str),
@@ -60,7 +56,6 @@ def generate_launch_description():
             name='sway_plotter_node',
             namespace=robot_name,
             output='screen',
-            # Later entries win: yaml < robot_name/use_sim_time < command line
             parameters=[
                 config_file,
                 {
