@@ -269,8 +269,18 @@ LATLON_CMD="ros2 topic echo /$ROBOT_NAME/smarc/latlon --once"
 ############
 # 4 Camera and hook detection
 ############
+# Two independent detector stacks run here, on the same camera images:
+#
+#   alars (YOLO_CMD)   -> alars_detection/labeled_obbs, auv_obb, buoy_obb,
+#                         auv_head, cam_processor_happy   [normalized coords]
+#   yolo_ros (YOLO_ROS_CMD) -> yolo/detections            [pixel coords]
+#                           -> yolo/detections_with_corners (corners adapter)
+#
+# Both are kept because only the alars one publishes the auv/buoy topics that
+# auv_state_estimation's projection nodes and the alars action servers consume.
 if [[ "$NO_CAM" == "True" ]]; then
     YOLO_CMD="echo 'Camera disabled, not launching YOLO detector - no hook detections will exist'"
+    YOLO_ROS_CMD="echo 'Camera disabled, not launching yolo_ros - yolo/detections will not exist'"
 else
     YOLO_DEVICE=0
     YOLO_MODEL="yolo_model_2cls_may.pt"
@@ -287,9 +297,54 @@ else
     use_sim_time:=$USE_SIM_TIME \
     model_package:=alars_labeling_training \
     model_file:=$YOLO_MODEL"
+
+    # yolo_ros wants ultralytics-style device names ('cuda:0'/'cpu'), not the
+    # bare index the alars detector takes.
+    YOLO_ROS_DEVICE="cuda:0"
+    if [[ $USE_SIM_TIME = "True" ]]; then
+        YOLO_ROS_DEVICE="cpu"
+    fi
+    # alars_yolo_corners.launch.py defaults this to 0.5, which is STRICTER than
+    # the 0.4 the alars detector uses (detection_parameters.yaml: 'hook' is not
+    # in per_class_confidence, so it falls back to confidence_threshold). Set
+    # low while checking whether the hook is detected at all; once it is, raise
+    # to 0.4 so both stacks agree on what counts as a detection.
+    #   YOLO_ROS_THRESHOLD=0.4 ./dji_bringup2.sh ...   overrides without editing
+    YOLO_ROS_THRESHOLD=${YOLO_ROS_THRESHOLD:-0.25}
+
+    # Inference resolution. yolo_node ALWAYS passes imgsz to ultralytics, unlike
+    # the alars detector which passes none and so runs at the model's own size on
+    # the full frame. Must be multiples of 32: 1080 is not, 1088 is.
+    YOLO_ROS_IMGSZ_H=${YOLO_ROS_IMGSZ_H:-1088}
+    YOLO_ROS_IMGSZ_W=${YOLO_ROS_IMGSZ_W:-1920}
+
+    # Publishes /$ROBOT_NAME/yolo/detections (yolo_msgs/DetectionArray, pixel
+    # coordinates) and, through yolo_corners_adapter, .../yolo/detections_with_corners.
+    #
+    # REQUIRES yolo_ros to have been built from inside the ros_yolo conda env,
+    # the same way alars_auv_perception was - see HANDOFF.md. As installed by a
+    # plain `colcon build`, yolo_node's shebang is /usr/bin/python3, which has
+    # no ultralytics, and the node dies on import before publishing anything.
+    # The corners adapter's shebang is /usr/bin/env python3, so the pane must
+    # NOT be inside a conda env: base is python 3.13 and rclpy's C extension is
+    # built for 3.10. `conda config --set auto_activate_base false` fixes it.
+    YOLO_ROS_CMD="PYTHONNOUSERSITE=1 ros2 launch yolo_smarc_actions alars_yolo_corners.launch.py \
+    robot_name:=$ROBOT_NAME \
+    use_sim_time:=$USE_SIM_TIME \
+    model_package:=alars_labeling_training \
+    model_subdir:=trained_models \
+    model_file:=$YOLO_MODEL \
+    device:=$YOLO_ROS_DEVICE \
+    threshold:=$YOLO_ROS_THRESHOLD \
+    imgsz_height:=$YOLO_ROS_IMGSZ_H \
+    imgsz_width:=$YOLO_ROS_IMGSZ_W"
 fi
 
-tmux_make_layout "$SESSION" Perception "row(var(YOLO_CMD))"
+tmux_make_layout "$SESSION" Perception "
+col(
+    var(YOLO_CMD),
+    var(YOLO_ROS_CMD)
+)"
 
 
 ############

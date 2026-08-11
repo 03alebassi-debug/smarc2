@@ -4,6 +4,7 @@ from rclpy.time     import Time
 from rclpy.duration import Duration
 
 from dji_msgs.msg       import Topics, Links, LabeledOBBs
+from smarc_msgs.msg     import Topics as SmarcTopics 
 from geometry_msgs.msg  import Vector3Stamped
 from nav_msgs.msg       import Odometry
 from sensor_msgs.msg    import CameraInfo, JointState
@@ -137,22 +138,22 @@ class HookKalmanFilter:
         qos_best_effort10 = QoSProfile(depth=10, 
                                                reliability=ReliabilityPolicy.BEST_EFFORT, 
                                                durability=QoSDurabilityPolicy.VOLATILE)
-        _hook_state_topic:str = 'hook_state'
+        _hook_state_topic:str = Topics.HOOK_STATE_CARTESIAN
         self._hook_state_pub = self._node.create_publisher(Odometry, _hook_state_topic, qos_best_effort10)
         self._node.get_logger().info(f'Publishing hook state on:{_hook_state_topic}')
 
-        _hook_raw_meas_topic:str = 'hook_raw_measurement'
+        _hook_raw_meas_topic:str = Topics.HOOK_RAW_MEASUREMENT
         self._hook_raw_meas_pub = self._node.create_publisher(Odometry, _hook_raw_meas_topic, qos_best_effort10)
         self._node.get_logger().info(f'Publishing raw hook measurement on:{_hook_raw_meas_topic}')
 
         qos_latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                                  durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
-        _params_topic:str = 'hook_pendulum_params'
+        _params_topic:str = Topics.HOOK_PENDULUM_PARAMETERS
         self._pendulum_params_pub = self._node.create_publisher(
             Float64MultiArray, _params_topic, qos_latched)
         self._node.get_logger().info(f'Publishing identified pendulum params on:{_params_topic}')
 
-        _hook_swing_topic:str = 'hook_swing_state'
+        _hook_swing_topic:str = Topics.HOOK_STATE_ANGULAR
         self._hook_swing_pub = self._node.create_publisher(JointState, _hook_swing_topic, qos_best_effort10)
         self._node.get_logger().info(f'Publishing hook swing state on:{_hook_swing_topic}')
 
@@ -168,7 +169,7 @@ class HookKalmanFilter:
                                        reliability=ReliabilityPolicy.BEST_EFFORT, 
                                        durability=QoSDurabilityPolicy.VOLATILE)
 
-        _cmd_vel_topic:str = 'cmd_vel_drone_frame'
+        _cmd_vel_topic:str = Topics.CMD_VELOCITY_DRONE_FRAME
         self._cmd_vel_subscriber = self._node.create_subscription(Vector3Stamped, 
                                                                   _cmd_vel_topic, 
                                                                   self._cmd_vel_callback, 
@@ -183,7 +184,7 @@ class HookKalmanFilter:
                                                                         10)
         self._node.get_logger().info(f'Succesfully subscribed to:{_camera_info_topic}')
 
-        _odom_topic:str = 'smarc/odom'
+        _odom_topic:str = SmarcTopics.ODOM_TOPIC
         self._odom_subscription = self._node.create_subscription(Odometry,
                                                                  _odom_topic,
                                                                  self._odom_callback,
@@ -306,10 +307,7 @@ class HookKalmanFilter:
             self._node.get_logger().warning(
                 f'Camera boresight is {tilt_from_down_deg:.0f}deg off straight-down '
                 f'(limit {self._max_boresight_tilt_deg:.0f}deg) - the pendulum-angle '
-                f'measurement is not valid in this pose, skipping this detection. '
-                f'Is the gimbal pointed down? '
-                f'(sim: ros2 topic pub -r 2 -t 5 {self._robot_name}/gimbal_camera/gimbal_cmd '
-                f'geometry_msgs/msg/Vector3 "{{x: 0.0, y: 90.0, z: 0.0}}")',
+                f'measurement is not valid in this pose, skipping this detection. ',
                 throttle_duration_sec=5.0
             )
             return
@@ -334,15 +332,14 @@ class HookKalmanFilter:
             wd = float(w @ d)
             disc = wd * wd - float(w @ w) + self._L * self._L
             if disc < 0.0:
-                # Ray misses the sphere entirely: the detection is inconsistent
-                # with L (bad L, bad detection, or the hook is not on this rope).
+                
                 self._node.get_logger().warning(
                     'Hook detection ray does not intersect the pendulum sphere '
                     f'(L={self._L:.2f}m) - skipping it',
                     throttle_duration_sec=5.0
                 )
                 return
-            s = -wd + np.sqrt(disc)   # far intersection = the hook below the drone
+            s = -wd + np.sqrt(disc)   
             if s <= 0.0:
                 self._node.get_logger().warning(
                     'Hook intersection resolved behind the camera - skipping it',
@@ -354,8 +351,6 @@ class HookKalmanFilter:
             self._last_meas[0] = np.arctan2(r[0], -r[2])
             self._last_meas[1] = np.arctan2(r[1], -r[2])
             self._pivot_in_base_flat = pivot
-
-        # Publish the raw single-detection measurement (pre-fusion, pre-gating)
         
         self._publish_raw_measurement(msg.header.stamp)
 

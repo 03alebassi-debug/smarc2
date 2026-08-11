@@ -198,7 +198,7 @@ class MoveToDumpedAction():
             if self._pendulum_params is not None:
                 return True
             self._node.get_logger().info(
-                'Waiting for hook_pendulum_params - is hook_kalman_filter_node '
+                f'Waiting for {self._params_topic} - is hook_kalman_filter_node '
                 'running and has its identification finished?',
                 throttle_duration_sec=2.0
             )
@@ -212,7 +212,7 @@ class MoveToDumpedAction():
         can never be tuned for a pendulum the estimator is not modelling."""
         if not self._wait_for_pendulum_params():
             self._node.get_logger().error(
-                'No hook_pendulum_params after 30s - rejecting the goal rather '
+                f'No {self._params_topic} after 30s - rejecting the goal rather '
                 'than guessing L/xi.'
             )
             return None
@@ -222,33 +222,30 @@ class MoveToDumpedAction():
             self._node.get_logger().error(f'Received non-positive rope length {L} - rejecting the goal')
             return None
         if not (0.0 < xi < 1.0):
-            # ZVD and LQR both assert 0 < xi < 1; a sysid that fits xi = 0
-            # exactly would otherwise raise mid-mission.
             self.log(f'Identified xi={xi} outside (0,1), clamping for the controllers')
             xi = min(max(xi, 1e-3), 0.99)
-        self.log(f'Using pendulum params from hook_pendulum_params: L={L:.3f}m, xi={xi:.4f}')
+        self.log(f'Using pendulum params from {self._params_topic}: L={L:.3f}m, xi={xi:.4f}')
         return L, xi
 
     def _create_subscriptions(self):
         qos_best_effort10 = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,
                                         durability=QoSDurabilityPolicy.VOLATILE)
 
+        self._hook_swing_topic:str = DJITopics.HOOK_STATE_ANGULAR
         self._node.create_subscription(
-            JointState, 'hook_swing_state',
+            JointState, self._hook_swing_topic,
             self._swing_state_callback, qos_best_effort10
         )
         self._node.create_subscription(
             Odometry, 'smarc/odom',
             self._odom_callback, 10
         )
-        # Latched by HookKalmanFilter (TRANSIENT_LOCAL), so this receives the
-        # identified pendulum even though the filter published it long before
-        # this subscription existed. Must MATCH that durability or nothing
-        # arrives.
+        
         qos_latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                                  durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+        self._params_topic:str = DJITopics.HOOK_PENDULUM_PARAMETERS
         self._node.create_subscription(
-            Float64MultiArray, 'hook_pendulum_params',
+            Float64MultiArray, self._params_topic,
             self._pendulum_params_callback, qos_latched
         )
 
@@ -278,8 +275,9 @@ class MoveToDumpedAction():
                                                                      DJITopics.VELOCITY_SETPOINT_TOPIC, 
                                                                      qos_profile=qos_best_effort10)
 
+        _drone_frame_ref_topic:str = DJITopics.CMD_VELOCITY_DRONE_FRAME
         self.drone_frame_ref_publisher = self._node.create_publisher(Vector3Stamped,
-                                                                     'cmd_vel_drone_frame',
+                                                                     _drone_frame_ref_topic,
                                                                      qos_profile=qos_best_effort10)
 
 
@@ -445,7 +443,7 @@ class MoveToDumpedAction():
 
         if self._swing_state is None:
             self._node.get_logger().warning(
-                'No hook_swing_state yet - flying feedforward only. Is '
+                f'No {self._hook_swing_topic} yet - flying feedforward only. Is '
                 'hook_kalman_filter_node running?', throttle_duration_sec=5.0
             )
             return None
@@ -454,7 +452,7 @@ class MoveToDumpedAction():
         age = self.now_time - (stamp.sec + stamp.nanosec * 1e-9)
         if age > self._max_estimate_age:
             self._node.get_logger().warning(
-                f'hook_swing_state is {age:.2f}s old (limit {self._max_estimate_age:.2f}s) '
+                f'{self._hook_swing_topic} is {age:.2f}s old (limit {self._max_estimate_age:.2f}s) '
                 f'- flying feedforward only', throttle_duration_sec=5.0
             )
             return None
