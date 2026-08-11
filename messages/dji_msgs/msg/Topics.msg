@@ -77,6 +77,7 @@ string OBJECT_EKF_MARKERS_TOPIC = 'alars_projection/object_pose_markers' # visua
 string HOOK_STATE_CARTESIAN = "alars_hook_kf/hook_state" # nav_msgs.msg/Odometry                -- hook estimate in cartesian coordinates 
 string HOOK_STATE_ANGULAR = "alars_hook_kf/hook_swing_state" # nav_msgs.msg/Odometry            -- hook state estimate in angular coordinates, needed for LQG controller 
 string HOOK_RAW_MEASUREMENT = "alars_hook_kf/hook_raw_measurement" # sensor_msgs.msg/JointState -- takes the yolo measurement and compute the hook position, needed for diagnostic
+string YOLO_DETECTIONS = "yolo/detections" # yolo_msgs.msg/DetectionArray
 
 # Hook Parameters 
 string HOOK_PENDULUM_PARAMETERS = "alars_pendulum/hook_pendulum_parameters" # std_msgs.msg/Float64MultiArray

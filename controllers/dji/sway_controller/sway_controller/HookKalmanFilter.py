@@ -3,7 +3,8 @@ from rclpy.qos      import QoSProfile, ReliabilityPolicy, QoSDurabilityPolicy
 from rclpy.time     import Time
 from rclpy.duration import Duration
 
-from dji_msgs.msg       import Topics, Links, LabeledOBBs
+from dji_msgs.msg       import Topics, Links
+from yolo_msgs.msg      import DetectionArray
 from smarc_msgs.msg     import Topics as SmarcTopics 
 from geometry_msgs.msg  import Vector3Stamped
 from nav_msgs.msg       import Odometry
@@ -158,10 +159,11 @@ class HookKalmanFilter:
         self._node.get_logger().info(f'Publishing hook swing state on:{_hook_swing_topic}')
 
     def _create_node_subscriptions(self):
-        _detection_topic_name:str = Topics.LABELED_OBBS_TOPIC
-        self._detection_subscription = self._node.create_subscription(LabeledOBBs, 
-                                                                      _detection_topic_name, 
-                                                                      self._detection_callback, 
+        
+        _detection_topic_name:str = Topics.YOLO_DETECTIONS
+        self._detection_subscription = self._node.create_subscription(DetectionArray,
+                                                                      _detection_topic_name,
+                                                                      self._detection_callback,
                                                                       10)
         self._node.get_logger().info(f'Succesfully subscribed to:{_detection_topic_name}')
 
@@ -192,10 +194,7 @@ class HookKalmanFilter:
         self._node.get_logger().info(f'Succesfully subscribed to:{_odom_topic}')
 
     def _lookup_pivot(self) -> "np.ndarray|None":
-        """Position of the rope attachment point (the pendulum pivot) in
-        base_flat_link. Not cached: rope_base_link is rigid w.r.t. base_link, but
-        base_flat_link differs from base_link by the drone's roll/pitch, so the
-        pivot does move slightly in this frame as the drone tilts."""
+        
         try:
             tf = self._tf_buffer.lookup_transform(
                 self._base_flat_frame, self._pivot_frame, Time(), timeout=Duration(seconds=0.05)
@@ -256,25 +255,13 @@ class HookKalmanFilter:
             self._node.get_logger().warning('Camera parameters not loaded yet, skipping measurement')
             return 
 
-        hook_indices = [i for i, cls_id in enumerate(msg.ids) if cls_id == "hook"]
-        if not hook_indices:
+        hook_dets = [d for d in msg.detections if d.class_name == "hook"]
+        if not hook_dets:
             self._node.get_logger().info(f'No hook detection in this frame', throttle_duration_sec=1.0)
-            return 
+            return
 
-        norm_x:float = 0.0
-        norm_y:float = 0.0
-        for idx in hook_indices:
-            pts = msg.obbs[idx].points
-            pts_norm_x:float = sum(p.x for p in pts) / len(pts)
-            pts_norm_y:float = sum(p.y for p in pts) / len(pts)
-            norm_x += pts_norm_x
-            norm_y += pts_norm_y
-
-        norm_x /= len(hook_indices)
-        norm_y /= len(hook_indices)
-    
-        u:float = norm_x * (self._image_width / 2) + (self._image_width / 2)
-        v:float = norm_y * (self._image_height / 2) + (self._image_height / 2)
+        u:float = sum(float(d.bbox.center.position.x) for d in hook_dets) / len(hook_dets)
+        v:float = sum(float(d.bbox.center.position.y) for d in hook_dets) / len(hook_dets)
 
         ray_in = Vector3Stamped()
         
@@ -357,15 +344,7 @@ class HookKalmanFilter:
         self._update()
 
     def _publish_raw_measurement(self, stamp):
-        """Publishes the hook position implied by the latest single detection
-        (theta_x/theta_y already rotated into base_flat_link), BEFORE any Kalman
-        prediction/update or Mahalanobis gating. This is the clean signal to
-        compare against hook_ground_truth_base_flat to check the
-        camera->base_flat_link axis mapping in isolation: hook_state is
-        confounded both by rejected updates (which fall back to pure prediction)
-        and by the prediction step being forced with real cmd_vel/odom, so if the
-        frames are consistent it's *this* topic - not hook_state - that should
-        land on the same axis as the ground truth."""
+        
         theta_x, theta_y = self._last_meas
         msg = Odometry()
         msg.header.stamp = stamp
@@ -516,12 +495,10 @@ class HookKalmanFilter:
             )
 
     def _publish_pendulum_params(self, L: float, xi: float):
-        """Publish the L/xi this filter is actually running with, once, latched.
+        """
+        Publish the L/xi this filter is actually running with, once, latched.
 
-        Deliberately the values the FILTER uses, not whatever the sysid returned:
-        if the filter fell back to the yaml or to placeholder defaults, consumers
-        must see that same fallback, otherwise the controller would be tuned for
-        a pendulum the estimator is not modelling."""
+        """
         msg = Float64MultiArray()
         msg.layout.dim = [MultiArrayDimension(label='length', size=1, stride=2),
                           MultiArrayDimension(label='damping', size=1, stride=1)]
@@ -529,14 +506,7 @@ class HookKalmanFilter:
         self._pendulum_params_pub.publish(msg)
 
     def _publish_swing_state(self, stamp):
-        """The raw filter state [theta_x, omega_x, theta_y, omega_y] - what a
-        controller consumes. Ordering matches LQG.LQR.IDX's theta_x/omega_x/
-        theta_y/omega_y entries, so it slices straight into the LQR state
-        vector with no conversion.
-
-        Variances come from the same Sigma the cartesian covariances are
-        linearised from, but UNlinearised - these are the angle/rate variances
-        themselves, so a controller can gate on estimate quality directly."""
+        """The raw filter state [theta_x, omega_x, theta_y, omega_y]"""
         theta_x, omega_x, theta_y, omega_y = self._mu
 
         msg = JointState()
