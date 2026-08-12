@@ -76,7 +76,7 @@ class EstimateLengthAndDamping:
         qos_latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                                  durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
         self._params_publisher = self._node.create_publisher(
-            Float64MultiArray, 'hook_pendulum_params_identified',
+            Float64MultiArray, DJITopics.HOOK_PENDULUM_PARAMETERS_IDENTIFIED,
             qos_profile=qos_latched
         )
 

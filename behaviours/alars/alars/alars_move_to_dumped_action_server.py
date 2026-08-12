@@ -20,6 +20,7 @@ from alars.alars_common import DroneState
 
 from dji_msgs.msg import Topics as DJITopics
 from dji_msgs.msg import Links  as DJILinks
+from smarc_msgs.msg import Topics as SmarcTopics
 
 import traceback
 import time
@@ -237,7 +238,7 @@ class MoveToDumpedAction():
             self._swing_state_callback, qos_best_effort10
         )
         self._node.create_subscription(
-            Odometry, 'smarc/odom',
+            Odometry, SmarcTopics.ODOM_TOPIC,
             self._odom_callback, 10
         )
         
