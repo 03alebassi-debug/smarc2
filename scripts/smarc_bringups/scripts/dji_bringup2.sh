@@ -281,10 +281,12 @@ LATLON_CMD="ros2 topic echo /$ROBOT_NAME/smarc/latlon --once"
 # Intrinsics the hook filter STARTS from, until CameraInfo arrives and overrides
 # them. Set outside the NO_CAM branch on purpose: the filter is launched either
 # way, so it always needs a file to read. Lives in auv_state_estimation/config.
+# NOTE: the sim camera is 1280x720 as of the Aug-2026 SMARCAssets update, so the
+# 720p file is right for BOTH now - sim_1080p_cam_params.yaml no longer matches
+# what Unity publishes. Only the startup values are at stake (CameraInfo
+# overrides fx/fy/cx/cy once it arrives), but starting from the wrong image size
+# skews the first measurements.
 CAM_CALIBRATION_FILE="z1_720p_cam_params.yaml"
-if [[ $USE_SIM_TIME = "True" ]]; then
-    CAM_CALIBRATION_FILE="sim_1080p_cam_params.yaml"
-fi
 
 if [[ "$NO_CAM" == "True" ]]; then
     YOLO_CMD="echo 'Camera disabled, not launching YOLO detector - no hook detections will exist'"
@@ -321,10 +323,14 @@ else
     YOLO_ROS_THRESHOLD=${YOLO_ROS_THRESHOLD:-0.25}
 
     # Inference resolution. yolo_node ALWAYS passes imgsz to ultralytics, unlike
-    # the alars detector which passes none and so runs at the model's own size on
-    # the full frame. Must be multiples of 32: 1080 is not, 1088 is.
-    YOLO_ROS_IMGSZ_H=${YOLO_ROS_IMGSZ_H:-1088}
-    YOLO_ROS_IMGSZ_W=${YOLO_ROS_IMGSZ_W:-1920}
+    # the alars detector which passes none and so runs at the model's own size.
+    # MUST match the camera feed: rescaling changes the apparent pixel size of
+    # the hook and the model then misses it entirely - upscaling 720p to 1088p
+    # cost every detection and dropped the rate from 16Hz to 1.5Hz. Check with
+    #   ros2 topic echo /$ROBOT_NAME/gimbal_camera/camera/camera_info --once
+    # and round the height UP to a multiple of 32 (720 -> 736, 1080 -> 1088).
+    YOLO_ROS_IMGSZ_H=${YOLO_ROS_IMGSZ_H:-736}
+    YOLO_ROS_IMGSZ_W=${YOLO_ROS_IMGSZ_W:-1280}
 
     # Publishes /$ROBOT_NAME/yolo/detections (yolo_msgs/DetectionArray, pixel
     # coordinates) and, through yolo_corners_adapter, .../yolo/detections_with_corners.

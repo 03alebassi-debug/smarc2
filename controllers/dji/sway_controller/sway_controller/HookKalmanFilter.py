@@ -51,8 +51,7 @@ class HookKalmanFilter:
 
         self._read_camera_params()
 
-        camera_optical_frame = 'z1_optical_frame' if use_simtime else Links.GIMBAL_OPTICAL_FRAME
-        self._camera_frame:str    = self._robot_name + '/' + camera_optical_frame
+        self._camera_frame:str    = self._robot_name + '/' + Links.GIMBAL_OPTICAL_FRAME
         self._base_flat_frame:str = self._robot_name + '/' + Links.BASE_FLAT
         
         self._pivot_frame:str     = self._robot_name + '/' + Links.ROPE_BASE_LINK
