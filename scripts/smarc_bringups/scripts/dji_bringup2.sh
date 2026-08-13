@@ -14,7 +14,7 @@
 #   - ros_tcp_endpoint (sim only)      - Unity bridge, publishes the TF tree
 #   - dji_captain (+ services)         - base_flat_link TF, odom, cmd_vel
 #   - alars_move_to_action_server      - used to excite the swing
-#   - alars_move_to_dumped_action_server - the sway-damped mission (ZVD + LQG)
+#   - alars_move_to_damped_action_server - the sway-damped mission (ZVD + LQG)
 #   - YOLO detector                    - the hook detections the filter eats
 #   - gimbal action server             - and a ready-made "point down" command
 #   - estimate_length_and_damping_node - action server the filter calls at boot
@@ -39,7 +39,7 @@
 #   2. Start hook_kalman_filter_node (Hook window). It runs the identification
 #      itself on startup - which EXCITES a swing - and publishes L/xi on the
 #      latched <robot>/hook_pendulum_params topic.
-#   3. Send a move_to_dumped goal. Run open loop first with
+#   3. Send a move_to_damped goal. Run open loop first with
 #      ENABLE_LQG=False ./dji_bringup2.sh M350 5.0
 #      It reads that topic, stabilises the payload first, then flies the
 #      shaped+damped trajectory.
@@ -49,7 +49,7 @@
 #      `ros2 service call /<robot>/save_sway_plots std_srvs/srv/Trigger` does
 #      the same without stopping the recording.
 #
-#   ros2 action send_goal /<robot>/move_to_dumped smarc_msgs/action/BaseAction \
+#   ros2 action send_goal /<robot>/move_to_damped smarc_msgs/action/BaseAction \
 #     '{goal: {data: "{\"waypoint\": {\"latitude\": 59.30651, \"longitude\": 18.70958, \"altitude\": 5.25, \"tolerance\": 0.5}}"}}' --feedback
 #
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -229,7 +229,7 @@ fi
 ############
 # 3 The two move actions
 #   - move_to        : plain, unshaped. Used to EXCITE the swing for testing.
-#   - move_to_dumped : the sway-damped mission (ZVD feedforward + LQG trim).
+#   - move_to_damped : the sway-damped mission (ZVD feedforward + LQG trim).
 #     It reads the identified L/xi off the latched
 #     /$ROBOT_NAME/hook_pendulum_params topic when a goal arrives, so
 #     hook_kalman_filter_node (Hook window) must have run its identification
@@ -244,7 +244,7 @@ ALARS_MOVE_TO_CMD="ros2 run alars alars_move_to_action_server --ros-args -r __ns
 # closed-loop flight (2026-07-26) diverged, so start here when in doubt:
 #   ENABLE_LQG=False ./dji_bringup2.sh M350 5.0
 ENABLE_LQG=${ENABLE_LQG:-True}
-ALARS_MOVE_TO_DUMPED_CMD="ros2 launch alars alars_move_to_dumped_server_launch.py \
+ALARS_MOVE_TO_DAMPED_CMD="ros2 launch alars alars_move_to_damped_server_launch.py \
 robot_name:=$ROBOT_NAME \
 use_sim_time:=$USE_SIM_TIME \
 enable_lqg:=$ENABLE_LQG"
@@ -255,7 +255,7 @@ tmux_make_layout "$SESSION" MoveTo "
 col(
     2:row(
         var(ALARS_MOVE_TO_CMD),
-        var(ALARS_MOVE_TO_DUMPED_CMD)
+        var(ALARS_MOVE_TO_DAMPED_CMD)
     ),
     1:pane
 )"

@@ -202,15 +202,15 @@ col(
 )"
 
 ############
-# 2b Move to dumped
+# 2b Move to damped
 ############
-ALARS_MOVE_TO_DUMPED_CMD="ros2 launch alars alars_move_to_dumped_server_launch.py \
+ALARS_MOVE_TO_DAMPED_CMD="ros2 launch alars alars_move_to_damped_server_launch.py \
 robot_name:=$ROBOT_NAME \
 use_sim_time:=$USE_SIM_TIME"
 
-tmux_make_layout "$SESSION" MoveToDumped "
+tmux_make_layout "$SESSION" MoveToDamped "
 row(
-    var(ALARS_MOVE_TO_DUMPED_CMD)
+    var(ALARS_MOVE_TO_DAMPED_CMD)
 )"
 
 ############

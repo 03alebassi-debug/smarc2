@@ -29,7 +29,7 @@ from sway_controller import PathParametrizer, ZVD, LQR
 
 G = 9.81
 
-class MoveToDumpedAction():
+class MoveToDampedAction():
     def __init__(self, node:Node):
         self._node:Node = node 
 
@@ -696,8 +696,8 @@ class MoveToDumpedAction():
 
 def main(args=None):
     rclpy.init(args=args)
-    node = Node("alars_move_to_dumped_action_server")
-    move_to_dumped_action_server = MoveToDumpedAction(node)
+    node = Node("alars_move_to_damped_action_server")
+    move_to_damped_action_server = MoveToDampedAction(node)
     executor = MultiThreadedExecutor()
     rclpy.spin(node, executor=executor)
     node.destroy_node()

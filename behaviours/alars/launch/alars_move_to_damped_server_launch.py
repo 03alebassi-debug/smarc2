@@ -125,7 +125,7 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
 
     config_file_name = PythonExpression([
-        "'alars_move_to_dumped_server_config_M350.yaml' if '", robot_name, "' == 'M350' else 'alars_move_to_dumped_server_config_FC30.yaml'"
+        "'alars_move_to_damped_server_config_M350.yaml' if '", robot_name, "' == 'M350' else 'alars_move_to_damped_server_config_FC30.yaml'"
     ])
     config_dir = os.path.join(get_package_share_directory('alars'), 'config')
 
@@ -144,8 +144,8 @@ def generate_launch_description():
 
     node = Node(
         package='alars',
-        executable='alars_move_to_dumped_action_server',
-        name='alars_move_to_dumped_server',
+        executable='alars_move_to_damped_action_server',
+        name='alars_move_to_damped_server',
         namespace=robot_name,
         output='screen',
         parameters=[
