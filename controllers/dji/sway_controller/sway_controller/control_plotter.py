@@ -1,7 +1,7 @@
 """Plots of what the controller did, built from published topics only.
 
 Previously the mission plots were assembled inside
-`alars_move_to_dumped_action_server` from its own internal state, which let them
+`alars_move_to_damped_action_server` from its own internal state, which let them
 show things nothing publishes - the feedforward/trim split, the shaped plan, the
 STABILIZING->MOVING boundary. That coupling is gone: the action server now only
 flies, and everything here is reconstructed from hook_swing_state, cmd_vel and

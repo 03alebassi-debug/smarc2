@@ -2,7 +2,7 @@
 
 Payload sway estimation and damping for a hook hanging on a rope below a DJI
 M350. Provides the estimator and the control pieces that
-`alars_move_to_dumped_action_server` (package `alars`) uses to fly a mission
+`alars_move_to_damped_action_server` (package `alars`) uses to fly a mission
 without exciting the payload.
 
 The hook is modelled as a **damped spherical pendulum, decoupled per axis**,
@@ -25,7 +25,7 @@ linearised about hanging straight down. Everything lives in
                             HookKalmanFilter ──> hook_pendulum_params
                                                         │      │
                                                         v      v
-                                        alars_move_to_dumped_action_server
+                                        alars_move_to_damped_action_server
                                           PathParametrizer -> ZVD -> LQR
                                                         │
                                                         v
