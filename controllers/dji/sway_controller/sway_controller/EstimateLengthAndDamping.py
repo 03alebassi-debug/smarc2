@@ -11,7 +11,7 @@ from geometry_msgs.msg import TwistStamped
 from std_msgs.msg import Float64MultiArray, MultiArrayDimension
 from dji_msgs.msg import Topics as DJITopics
 from dji_msgs.msg import Links as DJILinks
-from dji_msgs.msg import LabeledOBBs
+from yolo_msgs.msg import DetectionArray
 
 from smarc_action_base.gentler_action_server import GentlerActionServer
 
@@ -61,9 +61,9 @@ class EstimateLengthAndDamping:
         self._node.get_logger().info(msg)
 
     def _create_subscriptions(self):
-        _detection_topic_name = DJITopics.LABELED_OBBS_TOPIC
+        _detection_topic_name = DJITopics.YOLO_DETECTIONS
         self._detection_subscription = self._node.create_subscription(
-            LabeledOBBs, _detection_topic_name, self._detection_callback, 10
+            DetectionArray, _detection_topic_name, self._detection_callback, 10
         )
 
     def _create_publishers(self):
@@ -89,21 +89,13 @@ class EstimateLengthAndDamping:
         self.log('Published identified params on hook_pendulum_params_identified')
 
     def _detection_callback(self, msg):
-        hook_indices = [i for i, cls_id in enumerate(msg.ids) if cls_id == "hook"]
-        if not hook_indices:
+        
+        hook_dets = [d for d in msg.detections if d.class_name == "hook"]
+        if not hook_dets:
             return
 
-        norm_x = 0.0
-        norm_y = 0.0
-        for idx in hook_indices:
-            pts = msg.obbs[idx].points
-            norm_x += sum(p.x for p in pts) / len(pts)
-            norm_y += sum(p.y for p in pts) / len(pts)
-        norm_x /= len(hook_indices)
-        norm_y /= len(hook_indices)
-
-        self._last_x = norm_x
-        self._last_y = norm_y
+        self._last_x = sum(float(d.bbox.center.position.x) for d in hook_dets) / len(hook_dets)
+        self._last_y = sum(float(d.bbox.center.position.y) for d in hook_dets) / len(hook_dets)
         self._new_detection = True
 
     def _publish_velocity_setpoint(self, vx: float, vy: float):
@@ -231,11 +223,19 @@ class EstimateLengthAndDamping:
         ptp_y = max(ys) - min(ys)
         self._axis_index = 0 if ptp_x >= ptp_y else 1
         name = "image-horizontal" if self._axis_index == 0 else "image-vertical"
-        self.log(f'Fitting the period on the {name} axis '
-                 f'(peak-to-peak: horizontal {ptp_x:.4f}, vertical {ptp_y:.4f})')
-        if min(ptp_x, ptp_y) > 0.0 and max(ptp_x, ptp_y) / max(min(ptp_x, ptp_y), 1e-9) < 2.0:
-            self.log('WARNING: the two axes swing by similar amounts - the motion may '
-                     'not be planar, so the period fit could be unreliable')
+
+        largest = max(ptp_x, ptp_y)
+        if largest <= 0.0:
+            self.log('WARNING: the hook did not move on either axis, nothing to fit')
+        else:
+            rel_x, rel_y = ptp_x / largest, ptp_y / largest
+            self.log(f'Fitting the period on the {name} axis - relative swing: '
+                     f'horizontal {rel_x:.2f}, vertical {rel_y:.2f} '
+                     f'(peak-to-peak {ptp_x:.1f} / {ptp_y:.1f} px)')
+            secondary = min(rel_x, rel_y)
+            if secondary > 0.5:
+                self.log(f'WARNING: the smaller axis still swings {secondary:.0%} of the larger '
+                         'one. The motion is not planar, so the period fit could be unreliable')
 
         series = xs if self._axis_index == 0 else ys
         self._equilibrium = series[0]
