@@ -54,7 +54,7 @@ class MoveToDumpedAction():
 
         self._as = GentlerActionServer(
                     node,
-                    'move_to_dumped',
+                    'move_to_damped',
                     self._on_goal_received,
                     self._on_cancel_received,
                     self._prepare_loop,
@@ -92,7 +92,7 @@ class MoveToDumpedAction():
         node.declare_parameter('goal_tolerance', 0.2, double_desc)
         node.declare_parameter('max_speed', 1.0, double_desc)
         node.declare_parameter('max_acceleration', 2.0, double_desc)
-        node.declare_parameter('sattle_extra', 20.0, double_desc)
+        node.declare_parameter('settle_extra', 20.0, double_desc)
         
         
         node.declare_parameter('enable_lqg', True, bool_desc)
@@ -143,7 +143,7 @@ class MoveToDumpedAction():
         self._default_goal_tolerance = self._node.get_parameter('goal_tolerance').get_parameter_value().double_value
         self._max_speed = self._node.get_parameter('max_speed').get_parameter_value().double_value
         self._max_acceleration = self._node.get_parameter('max_acceleration').get_parameter_value().double_value
-        self._sattle_extra = self._node.get_parameter('sattle_extra').get_parameter_value().double_value
+        self._settle_extra = self._node.get_parameter('settle_extra').get_parameter_value().double_value
 
 
         self._enable_lqg = self._node.get_parameter('enable_lqg').get_parameter_value().bool_value
@@ -400,7 +400,7 @@ class MoveToDumpedAction():
 
             shaper_duration = self.Ti[-1]
             self._start_mission_time = self.now_time
-            self._t_end = self._start_mission_time + self._path_parametrizer._missionTime + shaper_duration + self._sattle_extra
+            self._t_end = self._start_mission_time + self._path_parametrizer._missionTime + shaper_duration + self._settle_extra
             
 
             return True
@@ -604,7 +604,7 @@ class MoveToDumpedAction():
         self._phase = 'MOVING'
         self._start_mission_time = self.now_time
         self._t_end = (self._start_mission_time + self._path_parametrizer._missionTime
-                       + self.Ti[-1] + self._sattle_extra)
+                       + self.Ti[-1] + self._settle_extra)
 
     def _publish_velocity(self, u_xy:np.ndarray) -> np.ndarray:
         """Publishes and returns what was ACTUALLY sent - the saturated command,
