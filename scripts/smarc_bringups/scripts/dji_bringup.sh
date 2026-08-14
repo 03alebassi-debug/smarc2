@@ -221,7 +221,7 @@ if [[ "$NO_CAM" == "True" ]]; then
 else
     # Launched, not `ros2 run`: sway_controller's nodes use plain relative
     # topic/action names and need the /$ROBOT_NAME namespace the launch sets.
-    ESTIMATE_LENGTH_AND_DAMPING_CMD="ros2 launch sway_controller estimate_length_and_damping_node_launch.py \
+    ESTIMATE_LENGTH_AND_DAMPING_CMD="ros2 launch alars estimate_length_and_damping_node_launch.py \
 robot_name:=$ROBOT_NAME \
 use_sim_time:=$USE_SIM_TIME"
 fi
