@@ -164,12 +164,6 @@ class MoveToDampedAction():
         self._stabilize_position_max = self._node.get_parameter('stabilize_position_max').get_parameter_value().double_value
 
     def _refresh_tuning_parameters(self):
-        """Re-read the LQG tuning knobs from the parameter server.
-
-        Called per goal, not once at startup: the controllers are BUILT per
-        mission, so their weights should be read per mission too. Without this,
-        `ros2 param set ... lqg_rho 10.0` is silently ignored because
-        _get_node_parameters() ran once in __init__ - which wasted a flight."""
         g = lambda n: self._node.get_parameter(n).get_parameter_value()
         self._enable_lqg = g('enable_lqg').bool_value
         self._lqg_rho = g('lqg_rho').double_value
@@ -188,10 +182,6 @@ class MoveToDampedAction():
                  f'max_trim={self._max_trim_speed:.2f} v_max={self._max_speed:.2f}')
 
     def _wait_for_pendulum_params(self, timeout: float = 30.0) -> bool:
-        """Block until hook_kalman_filter_node has latched the identified
-        pendulum. There is no file fallback and no default: without L/xi the
-        ZVD shaper and the LQR would both be built for an invented pendulum, so
-        it is better to refuse the goal than to fly a mistuned controller."""
         if self._pendulum_params is not None:
             return True
         start = self.now_time
@@ -207,10 +197,6 @@ class MoveToDampedAction():
         return False
 
     def _load_identified_pendulum_params(self) -> "tuple[float, float]|None":
-        """L/xi as published by the Kalman filter, or None if unavailable.
-
-        Deliberately the values the FILTER is running with, so the controller
-        can never be tuned for a pendulum the estimator is not modelling."""
         if not self._wait_for_pendulum_params():
             self._node.get_logger().error(
                 f'No {self._params_topic} after 30s - rejecting the goal rather '
@@ -431,14 +417,6 @@ class MoveToDampedAction():
             return 'No distance remaining info'
 
     def _lqg_correction(self, position_reference_map, velocity_reference_base_flat):
-        """The feedback trim added to the shaped feedforward, or None when the
-        loop must stay open (LQG off, no estimate, or a stale one).
-
-        Everything is assembled in base_flat_link, which is where the LQR model
-        and the swing estimate both live. Position enters as an ERROR vector
-        (drone minus plan) rotated into base_flat, so the reference passed to
-        controlAction is zero for those states - expressing an absolute position
-        in a body frame would be meaningless."""
         if self._lqr is None:
             return None
 
@@ -523,15 +501,6 @@ class MoveToDampedAction():
         return u_fb
 
     def _stabilize_tick(self) -> bool|None:
-        """Hold station and damp the payload before departing.
-
-        References are exactly what was asked for: theta_x = theta_y = 0, and
-        the drone held at wherever it was when this phase began. There is no
-        feedforward here - the whole command IS the correction.
-
-        Returns None while still stabilising; flips the phase to MOVING (and
-        restarts the mission clock) once settled or timed out.
-        """
         if self._hold_position_map is None:
             here = self._drone_state.drone_in_map_numpy
             if here is None:
@@ -598,19 +567,12 @@ class MoveToDampedAction():
         return None
 
     def _begin_mission(self):
-        """Restart the mission clock. The path is parametrised from t=0, so the
-        time spent stabilising must NOT count against it - otherwise the plan
-        starts part-way through and the drone jumps."""
         self._phase = 'MOVING'
         self._start_mission_time = self.now_time
         self._t_end = (self._start_mission_time + self._path_parametrizer._missionTime
                        + self.Ti[-1] + self._settle_extra)
 
     def _publish_velocity(self, u_xy:np.ndarray) -> np.ndarray:
-        """Publishes and returns what was ACTUALLY sent - the saturated command,
-        not the pre-saturation value that never left this node. Anything
-        inspecting the command (sway_plotter_node included) reads it off
-        cmd_vel / cmd_vel_drone_frame."""
         speed = float(np.linalg.norm(u_xy))
         if speed > self._max_speed:
             u_xy = u_xy * (self._max_speed / speed)
