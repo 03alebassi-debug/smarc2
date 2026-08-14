@@ -433,7 +433,7 @@ else
     # This is an action SERVER - it must already be running when you start the
     # filter, because hook_kalman_filter_node calls it (blocking) at startup to
     # get L/xi unless you override both.
-    ESTIMATE_LENGTH_AND_DAMPING_CMD="ros2 launch sway_controller estimate_length_and_damping_node_launch.py \
+    ESTIMATE_LENGTH_AND_DAMPING_CMD="ros2 launch alars estimate_length_and_damping_node_launch.py \
 robot_name:=$ROBOT_NAME \
 use_sim_time:=$USE_SIM_TIME"
 fi
