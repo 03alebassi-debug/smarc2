@@ -1,0 +1,678 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage[table]{colortbl}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{tcolorbox}
+
+\geometry{margin=2.5cm}
+\hypersetup{colorlinks=true,linkcolor=blue!50!black,urlcolor=blue!50!black}
+
+\newcommand{\param}[1]{\texttt{\small #1}}
+\newcommand{\topicname}[1]{\texttt{\small #1}}
+\newcommand{\plot}[1]{\textit{#1}}
+
+\newtcolorbox{fieldbox}[1]{colback=yellow!8،!white,colframe=yellow!50!black,
+  title={#1},fonttitle=\bfseries\small,boxrule=0.5pt,left=4pt,right=4pt,top=3pt,bottom=3pt}
+
+\title{Field Tuning Guide\\[0.3em]
+\large Hook Kalman Filter and Sway-Damped Move-To Controller}
+\author{ALARS / \texttt{sway\_controller} + \texttt{alars}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+This document maps what you \emph{observe} in a field test to what you should
+\emph{change}. It is written for the case where no ground truth is available:
+every diagnostic below is derived from signals the drone produces on its own,
+and specifically from the figures written by the
+\param{live\_testing\_debug\_plots} node. Section~\ref{sec:filter} covers the
+estimator, Section~\ref{sec:control} the controller, Section~\ref{sec:wind}
+wind and external disturbances, and Section~\ref{sec:recipe} gives an ordered
+tuning procedure.
+\end{abstract}
+
+\tableofcontents
+
+%======================================================================
+\section{What the estimator actually computes}
+\label{sec:model}
+
+The hook is modelled as a planar pendulum in two decoupled axes. Per axis, the
+state is $x=[\theta,\ \omega]^\top$ and the continuous dynamics are
+%
+\begin{equation}
+\dot\theta = \omega,
+\qquad
+\dot\omega = -\omega_n^2\,\theta - 2\xi\omega_n\,\omega - \frac{1}{L}a_{\text{pivot}},
+\qquad
+\omega_n=\sqrt{g/L},
+\end{equation}
+%
+where the pivot acceleration is reconstructed from the drone's first-order
+velocity response,
+%
+\begin{equation}
+a_{\text{pivot}} = -\tau\,v_{\text{meas}} + k\,u_{\text{cmd}} .
+\label{eq:pivot}
+\end{equation}
+%
+Here $v_{\text{meas}}$ comes from \topicname{smarc/odom} and $u_{\text{cmd}}$
+from \topicname{cmd\_vel\_drone\_frame}; $k$ and $\tau$ are the identified
+drone gains loaded from the \param{continuous\_model\_path} file. $L$ and $\xi$
+come from the identification action and arrive on
+\topicname{hook\_pendulum\_parameters}.
+
+\paragraph{Measurement.}
+The measurement is the hook's \emph{bearing}, not its position. The detector
+gives a pixel centre $(u,v)$, which becomes a ray in the camera optical frame
+and, after rotation into \texttt{base\_flat\_link}, two angles
+$\theta_x,\theta_y$ about straight-down. This matters for tuning: the
+measurement noise is fundamentally \emph{angular}, and its metric equivalent
+scales with the rope length.
+
+\begin{equation}
+\theta \approx \frac{u-c_x}{f_x},
+\qquad\Longrightarrow\qquad
+x_{\text{hook}} \approx L\theta \approx \frac{L}{f_x}(u-c_x).
+\label{eq:pixel_to_metre}
+\end{equation}
+
+%======================================================================
+\section{Filter parameters}
+\label{sec:filter}
+
+All of these live in \param{hook\_kalman\_filter\_node\_config.yaml} except
+$\sigma_{px}$, which is currently hardcoded (see
+Section~\ref{sec:sigma_px}).
+
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Parameter} & \textbf{Default} & \textbf{Units} & \textbf{Role} \\
+\midrule
+\param{qc}                     & 3.1  & rad$^2$/s$^3$ & process noise PSD \\
+\param{sigma\_initial}         & 1.0  & --            & initial covariance scale \\
+\param{mahalanobis\_thr}       & 16.0 & --            & outlier gate ($\chi^2_2$) \\
+\param{max\_boresight\_tilt\_deg} & 45.0 & deg        & gimbal validity gate \\
+\param{loop\_freq}             & 50   & Hz            & prediction rate \\
+$\sigma_{px},\sigma_{py}$ (hardcoded) & 10.0 & px     & measurement noise \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%----------------------------------------------------------------------
+\subsection{Process noise \param{qc} --- the single most important knob}
+
+The discrete process noise per axis is the continuous white-noise-acceleration
+model,
+%
+\begin{equation}
+Q_{\text{axis}} = q_c
+\begin{bmatrix}
+\Delta t^3/3 & \Delta t^2/2\\[2pt]
+\Delta t^2/2 & \Delta t
+\end{bmatrix},
+\qquad \Delta t = 1/\param{loop\_freq}.
+\label{eq:Q}
+\end{equation}
+%
+Physically, $q_c$ is the power spectral density of the \emph{angular
+acceleration} that the model does \emph{not} explain: unmodelled aerodynamics,
+rope stretch, payload spin, errors in $L$ and $\xi$, and errors in the pivot
+acceleration~\eqref{eq:pivot}. It is the ``how much do I distrust my own
+model'' dial.
+
+\paragraph{Interpretation.} A useful sanity anchor: if you believe the hook can
+experience an unmodelled angular acceleration of about $\sigma_a$
+[rad/s$^2$] sustained over a correlation time $T_c$, then
+$q_c \sim \sigma_a^2 T_c$. With $q_c=3.1$ you are asserting roughly
+$1.8$~rad/s$^2$ of unexplained angular acceleration per second of correlation
+--- generous, and appropriate for a first field campaign.
+
+\begin{center}
+\rowcolors{2}{gray!7}{white}
+\begin{longtable}{@{}p{6.6cm}p{3.0cm}p{5.4cm}@{}}
+\toprule
+\textbf{What you see} & \textbf{Where} & \textbf{What to do} \\
+\midrule
+\endhead
+Estimate visibly \emph{lags} the detections; the red line rounds off the swing
+peaks that the blue dots reach.
+& \plot{detection\_vs\_estimate}
+& \textbf{Increase} \param{qc} (factor 3--10). The filter is over-trusting the
+model. \\
+
+Estimate is jittery and chases every detection; it looks like a noisy copy of
+the blue dots.
+& \plot{detection\_vs\_estimate}
+& \textbf{Decrease} \param{qc} (factor 3--10). \\
+
+Innovation has a visible \emph{oscillation} at the pendulum frequency rather
+than looking like white noise.
+& \plot{filter\_health}, top-left
+& Model mismatch, not noise. Fix $L$ first (re-run identification); only then
+raise \param{qc}. \\
+
+Innovation std is much larger than the $\pm1\sigma$ band drawn on
+\plot{detection\_vs\_estimate}.
+& both
+& Filter is over-confident: raise \param{qc}, and check $\sigma_{px}$
+(Section~\ref{sec:sigma_px}). \\
+
+Many detections rejected as outliers, but they look fine by eye.
+& rejection warnings; gap in \plot{filter\_health} bottom-left
+& The gate is computed from $S=HPH^\top+R$; if $P$ and $R$ are both too small
+everything looks like an outlier. Raise \param{qc} \emph{before} touching
+\param{mahalanobis\_thr}. \\
+
+$\sigma_x,\sigma_y$ grow without bound.
+& \plot{filter\_health}, top-right
+& Not a $q_c$ problem --- no measurements are arriving. See
+Section~\ref{sec:dropouts}. \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\paragraph{Rescaling with \param{loop\_freq}.} $Q$ scales as $q_c\Delta t^3$ in
+the position term. If you change the prediction rate and want the same
+effective smoothing, rescale
+%
+\begin{equation}
+q_c^{\text{new}} = q_c^{\text{old}}\left(\frac{\Delta t_{\text{old}}}{\Delta t_{\text{new}}}\right)^{2}.
+\end{equation}
+%
+Going from 50~Hz to 100~Hz therefore means \emph{dividing} $q_c$ by 4.
+
+%----------------------------------------------------------------------
+\subsection{Measurement noise $\sigma_{px}$ and the matrix $R$}
+\label{sec:sigma_px}
+
+The measurement covariance is built from pixel noise and the focal length:
+%
+\begin{equation}
+R = \begin{bmatrix}
+(\sigma_{px}/f_x)^2 & 0\\
+0 & (\sigma_{py}/f_y)^2
+\end{bmatrix}.
+\label{eq:R}
+\end{equation}
+%
+Note that $R$ is rebuilt whenever \topicname{CameraInfo} arrives, so a
+resolution change automatically rescales it. $\sigma_{px}=\sigma_{py}=10$~px is
+presently a constant in \param{HookKalmanFilter.py}, not a ROS parameter; if
+you need to tune it in the field, promote it to the config yaml first.
+
+\begin{tcolorbox}[colback=blue!4,colframe=blue!45!black,title=\textbf{Calibrating $\sigma_{px}$ from a field run},fonttitle=\bfseries\small]
+Read the innovation standard deviation $s$ [m] directly from the legend of
+\plot{filter\_health} (top-left panel). Invert~\eqref{eq:pixel_to_metre} to get
+the equivalent pixel noise:
+\[
+\sigma_{px} \;\approx\; \frac{s\, f_x}{L}.
+\]
+\emph{Example:} $s=0.03$~m, $L=2.4$~m, $f_x\approx900$~px gives
+$\sigma_{px}\approx 11$~px --- consistent with the current default.
+If your measured value differs by more than roughly a factor of two, update it.
+Note this estimate is an \emph{upper} bound, because the innovation also
+contains process-noise contributions.
+\end{tcolorbox}
+
+\paragraph{Consistency test (NIS).} The normalised innovation squared,
+$d^2=\nu^\top S^{-1}\nu$, should average about $2$ (two degrees of freedom) if
+$Q$ and $R$ are both right.
+%
+\begin{itemize}[nosep]
+  \item $\overline{d^2}\gg 2$: filter over-confident. Raise $q_c$, or raise
+        $\sigma_{px}$, or both.
+  \item $\overline{d^2}\ll 2$: filter over-conservative --- it is ignoring good
+        information and will feel sluggish. Lower $q_c$.
+\end{itemize}
+
+\paragraph{Rope length couples into this.} Because the measurement is angular,
+the \emph{metric} accuracy degrades linearly with $L$. Doubling the rope
+doubles the position error for the same pixel noise. A long rope therefore
+justifies a proportionally larger $q_c$ only if the swing is genuinely less
+predictable --- not merely because the plot looks noisier.
+
+%----------------------------------------------------------------------
+\subsection{Outlier gate \param{mahalanobis\_thr}}
+
+A detection is rejected when $d^2 > \param{mahalanobis\_thr}$. Since $d^2$ is
+$\chi^2$ with two degrees of freedom, the false-rejection rate has the closed
+form $P(d^2>x)=e^{-x/2}$:
+
+\begin{center}
+\begin{tabular}{@{}rrl@{}}
+\toprule
+\textbf{Threshold} & \textbf{Rejected if model correct} & \textbf{Character} \\
+\midrule
+$5.99$  & $5\%$      & aggressive; rejects real motion \\
+$9.21$  & $1\%$      & tight \\
+$13.8$  & $0.1\%$    & moderate \\
+$16.0$  & $0.03\%$   & \textbf{default} --- permissive \\
+$25.0$  & $4\times10^{-4}\%$ & effectively off \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{itemize}[nosep]
+  \item \textbf{Raise it} if the update rate on \plot{filter\_health}
+        (bottom-left) sits well below the YOLO frame rate and the estimate is
+        starving. But first ask whether $q_c$ is too small --- that is the more
+        common cause.
+  \item \textbf{Lower it} only if you can see genuine false positives (YOLO
+        latching onto something else) reaching the filter. Confirm on
+        \plot{detection\_health} before acting: a sudden pixel jump with a
+        \emph{low confidence} score is a false positive; a smooth excursion is
+        real motion.
+\end{itemize}
+
+\begin{tcolorbox}[colback=red!4,colframe=red!45!black,title=\textbf{Failure mode worth knowing},fonttitle=\bfseries\small]
+A gate that is too tight is self-reinforcing: rejecting measurements makes $P$
+grow, which \emph{widens} the gate, but only after the estimate has already
+drifted. The signature is a burst of rejections followed by a jump when the
+filter finally accepts one. Look for a step in \plot{detection\_vs\_estimate}
+coinciding with a plateau in the update-rate panel.
+\end{tcolorbox}
+
+%----------------------------------------------------------------------
+\subsection{\param{sigma\_initial}, \param{max\_boresight\_tilt\_deg},
+\param{loop\_freq}}
+
+\begin{description}[leftmargin=1.4cm,style=nextline]
+\item[\param{sigma\_initial}] Sets $P_0=\param{sigma\_initial}\cdot I_4$.
+Affects only the first second or two. Raise it (2--10) if the filter takes a
+long time to lock on after a mid-air restart; lower it if the estimate jumps
+wildly at startup. It is \emph{not} a tuning knob for steady-state behaviour ---
+if changing it alters your plots after $t>5$~s, something else is wrong.
+
+\item[\param{max\_boresight\_tilt\_deg}] Detections are dropped when the camera
+boresight is more than this far from straight-down, because the measurement
+model interprets pixel offset as a pendulum angle about vertical. Symptom of it
+being too tight: detections visible on \plot{detection\_health} but no
+corresponding measurements on \plot{filter\_health}'s rate panel, during
+manoeuvres. Symptom of it being too loose: systematic innovation bias that
+correlates with drone attitude. $45^\circ$ is generous; $20$--$30^\circ$ is
+defensible if the gimbal holds nadir well.
+
+\item[\param{loop\_freq}] Prediction rate. Higher gives a smoother estimate and
+finer control timing at the cost of CPU. Remember to rescale $q_c$. There is no
+benefit in exceeding roughly $10\times$ the detection rate.
+\end{description}
+
+%----------------------------------------------------------------------
+\subsection{Detection dropouts}
+\label{sec:dropouts}
+
+The filter cannot be tuned around a perception failure. Before touching $q_c$,
+check \plot{detection\_health}:
+
+\begin{center}
+\rowcolors{2}{gray!7}{white}
+\begin{tabular}{@{}p{6.4cm}p{8.2cm}@{}}
+\toprule
+\textbf{Symptom} & \textbf{Cause and remedy} \\
+\midrule
+Hook centre approaches an image border (dotted lines) before every dropout
+& The hook is leaving frame. Point the gimbal down, reduce mission speed, or
+raise the flight altitude. Not a filter problem. \\
+Confidence drifts downwards over the run
+& Lighting or background change, or the model does not match the physical hook.
+Lower the detector threshold, or retrain. \\
+Blank frames scattered randomly at high confidence otherwise
+& Inference is dropping frames --- check CPU/GPU load and the inference
+resolution (\param{imgsz}). \\
+Detections stop entirely at a certain attitude
+& Boresight gate, see above. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+During a dropout the filter runs open loop on the pendulum model. The
+usable coasting time is roughly a quarter period,
+$T/4 = (\pi/2)\sqrt{L/g}$ --- about $0.8$~s for $L=2.4$~m. Beyond that the
+estimate is extrapolation, and \param{max\_estimate\_age} in the controller
+(Section~\ref{sec:gates}) should already have disabled feedback.
+
+%======================================================================
+\section{Controller parameters}
+\label{sec:control}
+
+The LQR uses Bryson-style weighting: each state is normalised by the largest
+value considered acceptable, so the weights are directly interpretable as
+tolerances.
+%
+\begin{equation}
+Q_1=\mathrm{diag}\!\left(
+\frac{1}{p_{max}^2},\frac{1}{p_{max}^2},\frac{1}{p_{z,max}^2},
+\frac{1}{\theta_{max}^2},\frac{1}{\dot\theta_{max}^2},
+\frac{1}{\theta_{max}^2},\frac{1}{\dot\theta_{max}^2},
+\frac{1}{v_{max}^2}\right),
+\qquad
+R=\rho\,\mathrm{diag}\!\left(\frac{1}{v_{max}^2}\right),
+\label{eq:bryson}
+\end{equation}
+%
+with $\dot\theta_{max}=\theta_{max}\,\omega_n$ derived automatically, and
+$Q=M^\top Q_1 M$ selecting the eight penalised states out of ten.
+
+\subsection{$\rho$ --- the aggressiveness dial}
+
+$\rho$ is the \emph{only} quantity that trades control effort against state
+regulation, because both $Q$ and $R$ are already normalised by their respective
+maxima. Since $R\propto\rho$ and the LQR gain scales roughly as
+$K\sim\sqrt{Q/R}$, we have approximately
+%
+\begin{equation}
+K \ \propto\ \frac{1}{\sqrt{\rho}}.
+\end{equation}
+%
+\textbf{Consequently $\rho$ must be moved by decades, not percentages.} Going
+from $10$ to $12$ does essentially nothing; going from $10$ to $1$ roughly
+triples the gain.
+
+\begin{center}
+\rowcolors{2}{gray!7}{white}
+\begin{longtable}{@{}p{6.6cm}p{3.0cm}p{5.4cm}@{}}
+\toprule
+\textbf{What you see} & \textbf{Where} & \textbf{What to do} \\
+\midrule
+\endhead
+Swing persists through the mission; the trim command is small and the drone
+looks like it is ignoring the payload.
+& \plot{swing\_state}, \plot{command\_tracking}
+& \textbf{Decrease} \param{lqg\_rho} by a decade ($10\rightarrow1$). \\
+
+Commanded velocity is pinned at $\pm$\param{max\_trim\_speed} for long stretches.
+& \plot{command\_tracking}
+& The controller wants more authority than it is allowed. Either
+\textbf{increase} \param{lqg\_rho} (calmer) or \textbf{raise}
+\param{max\_trim\_speed} (more authority). Saturation makes the loop
+effectively open --- do not leave it there. \\
+
+Drone jitters, command reverses rapidly, swing does not improve.
+& \plot{command\_tracking}, \plot{swing\_state}
+& The loop is amplifying estimator noise. \textbf{Increase} \param{lqg\_rho}
+\emph{and} check the innovation panel --- if the estimate is noisy, fix the
+filter first. \\
+
+Swing damped well but the drone overshoots the waypoint or wanders.
+& \plot{command\_tracking}
+& Swing weight dominates position. \textbf{Increase} \param{lqg\_theta\_max}
+(e.g.\ $0.3\rightarrow0.5$) or \textbf{decrease} \param{lqg\_position\_max}. \\
+
+Position held tightly but swing barely suppressed.
+& \plot{swing\_state}
+& The reverse. \textbf{Decrease} \param{lqg\_theta\_max} (e.g.\
+$0.3\rightarrow0.15$). \\
+
+Everything is sluggish, both position and swing.
+& all
+& \textbf{Decrease} \param{lqg\_rho}. If it is already $\lesssim0.1$ and still
+sluggish, the drone gains $k,\tau$ are probably wrong --- re-run the drone
+system identification. \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\paragraph{Recommended sweep.} $\rho\in\{100,\ 10,\ 1,\ 0.1\}$, one decade at a
+time, with \param{enable\_lqg} $=$ \texttt{False} flown first as the open-loop
+baseline. Four flights bracket the useful range.
+
+\subsection{Bryson tolerances}
+
+\begin{description}[leftmargin=1.4cm,style=nextline]
+\item[\param{lqg\_theta\_max} (0.3 rad)] ``A swing of this size is as bad as a
+position error of \param{lqg\_position\_max}.'' It also implicitly sets the
+rate weight through $\dot\theta_{max}=\theta_{max}\omega_n$, so lowering it
+penalises swing \emph{rate} proportionally too. Do not set it below the noise
+floor of your $\theta$ estimate --- read that off the $\pm1\sigma$ band in
+\plot{swing\_state}. Penalising a state you cannot observe produces chatter.
+
+\item[\param{lqg\_position\_max} (0.3 m)] The position error considered as bad
+as $\theta_{max}$ of swing. Raise it to prioritise swing damping over
+waypoint accuracy; lower it for tight positioning.
+
+\item[\param{max\_speed} (1.0 m/s)] Doubles as the input normalisation
+$1/v_{max}^2$ in both $Q_1$ and $R$. Changing it therefore alters the gain as
+well as the limit --- if you change \param{max\_speed}, re-check $\rho$.
+
+\item[\param{max\_acceleration} (2.0 m/s$^2$)] Used to time the trajectory, not
+in the LQR. Too high and the ZVD feedforward excites more swing than the
+shaper can cancel; too low and missions crawl. It should be comfortably within
+what the drone actually achieves --- verify on \plot{command\_tracking}.
+\end{description}
+
+\subsection{Safety gates}
+\label{sec:gates}
+
+These do not shape performance; they decide when feedback is trustworthy.
+
+\begin{center}
+\rowcolors{2}{gray!7}{white}
+\begin{tabular}{@{}p{4.2cm}p{1.6cm}p{8.6cm}@{}}
+\toprule
+\textbf{Parameter} & \textbf{Default} & \textbf{Guidance} \\
+\midrule
+\param{max\_estimate\_age} & 0.5 s &
+Older than this, feedback is dropped and the mission continues open loop.
+Should be below the coasting limit $T/4=(\pi/2)\sqrt{L/g}$. For $L=2.4$~m that
+is $0.78$~s, so $0.5$~s is sound. Shorten it for short ropes. \\
+\param{max\_trim\_speed} & 0.5 m/s &
+Must exceed $L\,\omega_{peak}$, otherwise the drone physically cannot chase the
+payload. Estimate $\omega_{peak}$ from \plot{swing\_state}. \\
+\param{max\_theta\_for\_lqg} & 0.35 rad &
+Beyond this the small-angle linearisation is invalid and feedback is dropped.
+$0.35$~rad is $20^\circ$, where $\sin\theta$ has already departed
+$\theta$ by $2\%$. Do not raise it much above $0.4$. \\
+\param{goal\_tolerance} & 0.2 m &
+Arrival radius. Must be larger than your position estimate error, or the
+mission never terminates. \\
+\param{settle\_extra} & 20 s &
+Extra time granted after the planned trajectory ends, for the payload to
+settle. Increase if runs are being cut off mid-damping. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Pre-mission stabilisation}
+
+This phase damps the payload before departing. The command \emph{is} the whole
+control action here (there is no feedforward to trim), which is why
+\param{stabilize\_rho} $=2.0$ is lower than \param{lqg\_rho} $=10.0$.
+
+\begin{center}
+\rowcolors{2}{gray!7}{white}
+\begin{tabular}{@{}p{4.6cm}p{1.6cm}p{8.2cm}@{}}
+\toprule
+\textbf{Parameter} & \textbf{Default} & \textbf{Guidance} \\
+\midrule
+\param{stabilize\_before\_mission} & True & Set \texttt{False} to isolate
+mission-phase behaviour when A/B testing. \\
+\param{stabilize\_theta\_tol} & 0.02 rad &
+$\approx1.1^\circ$. Must be above the $\theta$ noise floor or stabilisation
+never converges. Read the noise floor from the $\pm1\sigma$ band in
+\plot{swing\_state}. \\
+\param{stabilize\_omega\_tol} & 0.05 rad/s & As above, for the rate. \\
+\param{stabilize\_settle\_time} & 1.0 s &
+Time inside tolerance before departure. Raise to $\sim T/2$ if the payload is
+departing at a swing extremum. \\
+\param{stabilize\_timeout} & 45 s &
+Give up and depart anyway. If you hit this routinely, the tolerances are below
+the noise floor, or wind is preventing settling (Section~\ref{sec:wind}). \\
+\param{stabilize\_rho} & 2.0 & Same decade logic as \param{lqg\_rho}. \\
+\param{stabilize\_theta\_max} & 0.3 rad & As \param{lqg\_theta\_max}. \\
+\param{stabilize\_position\_max} & 2.0 m &
+Deliberately loose: during stabilisation you do not care where the drone
+drifts, only that the payload stops swinging. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%======================================================================
+\section{Wind and external disturbances}
+\label{sec:wind}
+
+Neither the estimator nor the controller models wind. Its effects are therefore
+absorbed elsewhere, and recognising \emph{where} is the key to not mis-tuning.
+
+\subsection{Steady wind: an equilibrium offset, not noise}
+
+A constant horizontal wind exerts a steady drag on the payload, so the hook
+hangs at a non-zero angle
+%
+\begin{equation}
+\theta_{\text{eq}} \approx \arctan\!\left(\frac{F_{\text{drag}}}{m g}\right),
+\qquad
+F_{\text{drag}} = \tfrac{1}{2}\rho_{\text{air}} C_d A\, v_{\text{wind}}^2 .
+\end{equation}
+
+\paragraph{Signature.} On \plot{swing\_state}, $\theta$ oscillates about a
+\emph{non-zero mean}. On \plot{filter\_health} the innovation stays zero-mean
+(the filter is tracking correctly --- the hook really is over there). On
+\plot{command\_tracking} the trim command has a constant offset.
+
+\begin{tcolorbox}[colback=orange!5,colframe=orange!55!black,title=\textbf{Do not ``fix'' this with \param{qc}},fonttitle=\bfseries\small]
+A steady offset is not process noise. Raising $q_c$ will not remove it and will
+only make the estimate noisier. The offset is real and the estimator is right.
+\end{tcolorbox}
+
+\paragraph{What it does to the controller.} The LQR drives $\theta\to0$, so it
+will fight the wind continuously, holding a steady trim and accepting a
+steady-state \emph{position} error (there is no integral action). Options:
+%
+\begin{itemize}[nosep]
+  \item \textbf{Accept it.} Increase \param{lqg\_theta\_max} so the controller
+        tolerates the offset and prioritises position instead.
+  \item \textbf{Check saturation.} A constant trim eats headroom. If the offset
+        alone approaches \param{max\_trim\_speed}, there is nothing left for
+        damping --- raise \param{max\_trim\_speed} or increase
+        \param{lqg\_rho}.
+  \item \textbf{Widen arrival.} A steady-state offset may exceed
+        \param{goal\_tolerance} and stall the mission.
+\end{itemize}
+
+\subsection{Gusts and turbulence: genuine process noise}
+
+Gusts \emph{are} what $q_c$ exists to represent.
+
+\begin{center}
+\rowcolors{2}{gray!7}{white}
+\begin{tabular}{@{}p{6.2cm}p{8.4cm}@{}}
+\toprule
+\textbf{Signature} & \textbf{Response} \\
+\midrule
+Innovation shows intermittent large excursions, otherwise clean
+& \textbf{Increase} \param{qc} so the filter can follow gust-driven motion. Do
+\emph{not} tighten \param{mahalanobis\_thr} --- you would reject exactly the
+real motion you need. \\
+Bursts of rejected detections coinciding with visible gusts
+& Increase \param{qc}; if rejections persist, raise
+\param{mahalanobis\_thr} to $25$. \\
+Swing amplitude never decays to \param{stabilize\_theta\_tol}
+& Wind is continuously re-exciting the pendulum. Raise
+\param{stabilize\_theta\_tol}, raise \param{stabilize\_timeout}, or accept
+departure with residual swing. \\
+Estimate lags only during gusts
+& $q_c$ too small for the conditions. Consider a windy-day config with
+$q_c$ raised by $3$--$10\times$. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{A windy-day profile.} It is entirely legitimate to keep two configs.
+Relative to calm defaults: $q_c\times5$, \param{mahalanobis\_thr} $\to25$,
+\param{stabilize\_theta\_tol} $\to0.05$, \param{stabilize\_timeout} $\to60$,
+\param{max\_trim\_speed} $\to0.8$, \param{lqg\_rho} unchanged.
+
+\subsection{Other disturbances}
+
+\begin{description}[leftmargin=1.4cm,style=nextline]
+\item[Rotor downwash] Strongest directly under the drone --- precisely where
+the hook hangs. It is largely \emph{steady} in hover and scales with thrust, so
+it behaves like a small vertical-axis bias rather than noise. It changes during
+acceleration, which can look like model mismatch. If innovation correlates with
+commanded acceleration, suspect downwash (or a wrong $k,\tau$).
+
+\item[Payload spin] A hook rotating about its own axis moves the detected
+bounding-box centroid without the pendulum angle changing. This injects
+measurement noise at the spin frequency. Signature: innovation with a periodic
+component that is \emph{not} at $\omega_n$. Remedy: raise $\sigma_{px}$; $q_c$
+is the wrong knob because the hook is not actually accelerating.
+
+\item[Rope stretch / non-rigid rope] Violates the fixed-$L$ assumption. Shows
+as an innovation component at twice the pendulum frequency. Absorb with $q_c$;
+there is no better option without extending the model.
+
+\item[Ground effect and obstacles] Near the ground or a vessel, the flow field
+changes rapidly with position. Expect the tuning that worked at altitude to be
+too tight during descent. This is the strongest argument for keeping
+\param{lqg\_rho} conservative on approach.
+
+\item[Vessel motion (recovery to a moving deck)] Not a disturbance to the
+pendulum, but the target moves. Nothing here compensates for it; the mission
+layer must.
+\end{description}
+
+%======================================================================
+\section{Ordered tuning procedure}
+\label{sec:recipe}
+
+Tune in this order. Each step assumes the previous ones are settled ---
+inverting the order is the most common way to waste a flight day.
+
+\begin{enumerate}[leftmargin=*,itemsep=4pt]
+\item \textbf{Perception.} Fly, hover, swing the hook by hand or with the
+identification action. Check \plot{detection\_health}: near-100\% detection,
+stable confidence, hook well inside frame. Nothing downstream is meaningful
+until this holds.
+
+\item \textbf{Identification.} Run \texttt{estimate\_length\_and\_damping}.
+Confirm the relative-swing report shows a clearly planar motion
+($1.00$ vs $\lesssim0.2$). Sanity-check $L$ against the physical rope; if they
+disagree, the frames or intrinsics are wrong, not the fit.
+
+\item \textbf{Filter, open loop} (\param{enable\_lqg} \texttt{False}). Tune
+$q_c$ until the innovation on \plot{filter\_health} is zero-mean, white, with
+std consistent with the $\pm1\sigma$ band. Calibrate $\sigma_{px}$ using the
+box in Section~\ref{sec:sigma_px}. Do not proceed with a filter you do not
+trust --- every controller symptom is ambiguous otherwise.
+
+\item \textbf{Gates.} Set \param{max\_estimate\_age} below $T/4$, and
+\param{max\_trim\_speed} above $L\omega_{peak}$ measured in step 3.
+
+\item \textbf{Controller, decade sweep.} With everything else fixed, fly
+$\rho\in\{100,10,1,0.1\}$. Pick the smallest $\rho$ that does not saturate the
+trim or excite jitter, then back off one half-decade for margin.
+
+\item \textbf{Bryson balance.} Only now adjust \param{lqg\_theta\_max} and
+\param{lqg\_position\_max} to trade swing suppression against waypoint
+accuracy.
+
+\item \textbf{Stabilisation phase.} Set \param{stabilize\_theta\_tol} above the
+observed $\theta$ noise floor, then tune \param{stabilize\_rho} by the same
+decade logic.
+
+\item \textbf{Repeat in wind.} Re-check step 3 conclusions; keep a separate
+windy-day config rather than compromising the calm one.
+\end{enumerate}
+
+\begin{tcolorbox}[colback=green!4,colframe=green!45!black,title=\textbf{One change at a time},fonttitle=\bfseries\small]
+$q_c$ and $\rho$ produce \emph{similar-looking} symptoms --- a sluggish response
+can come from either. Changing both in one flight makes the result
+uninterpretable. Save the plot directory from every run; the timestamped output
+of \param{live\_testing\_debug\_plots} is designed for exactly this comparison.
+\end{tcolorbox}
+
+\end{document}

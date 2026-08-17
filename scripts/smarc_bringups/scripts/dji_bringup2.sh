@@ -1,71 +1,11 @@
 #! /bin/bash
-#
-# dji_bringup2.sh - a trimmed-down dji_bringup.sh for hook-pendulum /
-# sway_controller work (hook Kalman filter, length+damping identification,
-# ground-truth comparison).
-#
-# Same arguments and conventions as dji_bringup.sh, but it only launches what
-# that workflow actually needs. This matters beyond tidiness: the hook filter
-# has a documented problem where _prediction() ticks at ~0.3s instead of the
-# requested 0.02s because the machine is saturated, so every node that isn't
-# needed is actively harmful here.
-#
-# LAUNCHED:
-#   - ros_tcp_endpoint (sim only)      - Unity bridge, publishes the TF tree
-#   - dji_captain (+ services)         - base_flat_link TF, odom, cmd_vel
-#   - alars_move_to_action_server      - used to excite the swing
-#   - alars_move_to_damped_action_server - the sway-damped mission (ZVD + LQG)
-#   - YOLO detector                    - the hook detections the filter eats
-#   - gimbal action server             - and a ready-made "point down" command
-#   - estimate_length_and_damping_node - action server the filter calls at boot
-#   - hook_ground_truth_comparator_node- republishes Unity GT into base_flat_link
-#   - sway_plotter_node                - the ONLY node that plots; records the
-#                                        estimator and controller topics and
-#                                        writes every PNG on Ctrl+C
-#
-# NOT launched (present in dji_bringup.sh): behaviour trees, WASP/wara-ps,
-# mqtt bridge + mosquitto, rosboard, geofence / log / wait / internet checker,
-# NAU driver, succorfish modem, search / follow_auv / recover action servers,
-# and the SAM+buoy projection EKF (auv_buoy_ekf_launch).
-# Dropping the geofence node is safe: dji_captain guards its geofence checks
-# with `if self._geofence_status is not None`.
-#
-# NOT started, but pre-typed into a pane for you to press Enter on:
-#   - hook_kalman_filter_node  (Hook window, bottom pane)
-#   - gimbal "point straight down"  (Gimbal window, bottom pane)
-#
-# Order of operations for a damped mission:
-#   1. Captain up, drone flying, gimbal pointed down (Gimbal window).
-#   2. Start hook_kalman_filter_node (Hook window). It runs the identification
-#      itself on startup - which EXCITES a swing - and publishes L/xi on the
-#      latched <robot>/hook_pendulum_params topic.
-#   3. Send a move_to_damped goal. Run open loop first with
-#      ENABLE_LQG=False ./dji_bringup2.sh M350 5.0
-#      It reads that topic, stabilises the payload first, then flies the
-#      shaped+damped trajectory.
-#   4. For plots: Ctrl+C the sway_plotter_node pane (Hook window) once the
-#      mission is over. It writes <PLOT_OUTPUT_DIR>/estimator/*.png and
-#      <PLOT_OUTPUT_DIR>/control/*.png, default /home/aleba/sway_plots.
-#      `ros2 service call /<robot>/save_sway_plots std_srvs/srv/Trigger` does
-#      the same without stopping the recording.
-#
-#   ros2 action send_goal /<robot>/move_to_damped smarc_msgs/action/BaseAction \
-#     '{goal: {data: "{\"waypoint\": {\"latitude\": 59.30651, \"longitude\": 18.70958, \"altitude\": 5.25, \"tolerance\": 0.5}}"}}' --feedback
-#
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/tmux_layout.sh"
 
-# Type a command into a pane WITHOUT running it (no C-m), so it sits on the
-# prompt waiting for you to press Enter. Called at the very end of this script,
-# not inline: each pane runs a fresh shell whose rc file (conda init etc) takes
-# a moment, and text sent before the prompt is drawn gets painted twice.
 preload_pane() {
     local target="$1"
     local cmd="$2"
-    # `clear` first: a slow rc file (conda init) can mean the shell is not in
-    # readline yet, so the raw characters get echoed by the tty and then drawn
-    # a second time when the prompt finally appears. Running clear guarantees a
-    # settled prompt on a blank screen before the command is typed onto it.
     tmux send-keys -t "$target" "clear" C-m
     sleep 0.3
     tmux send-keys -t "$target" -- "$cmd"
@@ -121,8 +61,7 @@ else
 fi
 
 
-# Deliberately a different session name from dji_bringup.sh's ${ROBOT_NAME}_bringup,
-# so this can be checked/killed independently and the two never collide.
+#
 SESSION=${ROBOT_NAME}_bringup2
 
 if tmux has-session -t $SESSION 2>/dev/null; then
@@ -154,9 +93,7 @@ elif [[ $ROBOT_NAME == "FC30" ]]; then
 fi
 HOOK_LINE_LENGTH=10.0
 
-# Real Z1 Pro hardware and the Unity sim have OPPOSITE pitch sign conventions on
-# gimbal_cmd: on the real rig negative = down, in the sim +90 empirically points
-# down. Don't "fix" one from the other.
+
 if [[ $USE_SIM_TIME = "True" ]]; then
     GIMBAL_DOWN_PITCH="90.0"
 else
@@ -276,16 +213,7 @@ LATLON_CMD="ros2 topic echo /$ROBOT_NAME/smarc/latlon --once"
 #   yolo_ros (YOLO_ROS_CMD) -> yolo/detections            [pixel coords]
 #                           -> yolo/detections_with_corners (corners adapter)
 #
-# Both are kept because only the alars one publishes the auv/buoy topics that
-# auv_state_estimation's projection nodes and the alars action servers consume.
-# Intrinsics the hook filter STARTS from, until CameraInfo arrives and overrides
-# them. Set outside the NO_CAM branch on purpose: the filter is launched either
-# way, so it always needs a file to read. Lives in auv_state_estimation/config.
-# NOTE: the sim camera is 1280x720 as of the Aug-2026 SMARCAssets update, so the
-# 720p file is right for BOTH now - sim_1080p_cam_params.yaml no longer matches
-# what Unity publishes. Only the startup values are at stake (CameraInfo
-# overrides fx/fy/cx/cy once it arrives), but starting from the wrong image size
-# skews the first measurements.
+
 CAM_CALIBRATION_FILE="z1_720p_cam_params.yaml"
 
 if [[ "$NO_CAM" == "True" ]]; then
@@ -314,34 +242,14 @@ else
     if [[ $USE_SIM_TIME = "True" ]]; then
         YOLO_ROS_DEVICE="cpu"
     fi
-    # alars_yolo_corners.launch.py defaults this to 0.5, which is STRICTER than
-    # the 0.4 the alars detector uses (detection_parameters.yaml: 'hook' is not
-    # in per_class_confidence, so it falls back to confidence_threshold). Set
-    # low while checking whether the hook is detected at all; once it is, raise
-    # to 0.4 so both stacks agree on what counts as a detection.
-    #   YOLO_ROS_THRESHOLD=0.4 ./dji_bringup2.sh ...   overrides without editing
+    
     YOLO_ROS_THRESHOLD=${YOLO_ROS_THRESHOLD:-0.25}
 
-    # Inference resolution. yolo_node ALWAYS passes imgsz to ultralytics, unlike
-    # the alars detector which passes none and so runs at the model's own size.
-    # MUST match the camera feed: rescaling changes the apparent pixel size of
-    # the hook and the model then misses it entirely - upscaling 720p to 1088p
-    # cost every detection and dropped the rate from 16Hz to 1.5Hz. Check with
-    #   ros2 topic echo /$ROBOT_NAME/gimbal_camera/camera/camera_info --once
-    # and round the height UP to a multiple of 32 (720 -> 736, 1080 -> 1088).
+    
     YOLO_ROS_IMGSZ_H=${YOLO_ROS_IMGSZ_H:-736}
     YOLO_ROS_IMGSZ_W=${YOLO_ROS_IMGSZ_W:-1280}
 
-    # Publishes /$ROBOT_NAME/yolo/detections (yolo_msgs/DetectionArray, pixel
-    # coordinates) and, through yolo_corners_adapter, .../yolo/detections_with_corners.
-    #
-    # REQUIRES yolo_ros to have been built from inside the ros_yolo conda env,
-    # the same way alars_auv_perception was - see HANDOFF.md. As installed by a
-    # plain `colcon build`, yolo_node's shebang is /usr/bin/python3, which has
-    # no ultralytics, and the node dies on import before publishing anything.
-    # The corners adapter's shebang is /usr/bin/env python3, so the pane must
-    # NOT be inside a conda env: base is python 3.13 and rclpy's C extension is
-    # built for 3.10. `conda config --set auto_activate_base false` fixes it.
+    
     YOLO_ROS_CMD="PYTHONNOUSERSITE=1 ros2 launch yolo_smarc_actions alars_yolo_corners.launch.py \
     robot_name:=$ROBOT_NAME \
     use_sim_time:=$USE_SIM_TIME \
@@ -364,11 +272,7 @@ col(
 ############
 # 5 Gimbal
 ############
-# The measurement model treats the hook's pixel offset as a pendulum angle about
-# straight-down, so the camera MUST be pointed down or the filter drops every
-# detection (HookKalmanFilter guards on max_boresight_tilt_deg). The sim comes up
-# with the gimbal HORIZONTAL, so this is not optional - hence the ready-to-run
-# command in the bottom pane.
+
 if [[ "$NO_CAM" == "True" ]]; then
     GIMBAL_CAM_VIDEO_CMD="echo 'Camera disabled, not launching gscam node'"
     GIMBAL_CAM_DRIVER_CMD="echo 'Camera disabled, not launching gimbal driver node'"
@@ -430,9 +334,7 @@ GIMBAL_DOWN_CMD="ros2 topic pub -r 2 -t 10 /$ROBOT_NAME/gimbal_camera/gimbal_cmd
 if [[ "$NO_CAM" == "True" ]]; then
     ESTIMATE_LENGTH_AND_DAMPING_CMD="echo 'Camera disabled, not launching estimate_length_and_damping_node'"
 else
-    # This is an action SERVER - it must already be running when you start the
-    # filter, because hook_kalman_filter_node calls it (blocking) at startup to
-    # get L/xi unless you override both.
+    
     ESTIMATE_LENGTH_AND_DAMPING_CMD="ros2 launch alars estimate_length_and_damping_node_launch.py \
 robot_name:=$ROBOT_NAME \
 use_sim_time:=$USE_SIM_TIME"
@@ -444,35 +346,38 @@ HOOK_GT_COMPARATOR_CMD="ros2 launch sway_controller hook_ground_truth_comparator
 robot_name:=$ROBOT_NAME \
 use_sim_time:=$USE_SIM_TIME"
 
-# The ONLY node that plots. It is a pure subscriber, so it can sit here for the
-# whole session: start it before the mission, then Ctrl+C this pane (or call
-# `ros2 service call /$ROBOT_NAME/save_sway_plots std_srvs/srv/Trigger`) to
-# write everything it recorded to $PLOT_OUTPUT_DIR.
+
 PLOT_OUTPUT_DIR=${PLOT_OUTPUT_DIR:-/home/aleba/sway_plots}
 SWAY_PLOTTER_CMD="ros2 launch sway_controller sway_plotter_node_launch.py \
 robot_name:=$ROBOT_NAME \
 use_sim_time:=$USE_SIM_TIME \
 plot_output_dir:=$PLOT_OUTPUT_DIR"
 
-tmux_make_layout "$SESSION" Hook "
-col(
-    1:var(ESTIMATE_LENGTH_AND_DAMPING_CMD),
-    1:var(HOOK_GT_COMPARATOR_CMD),
-    1:var(SWAY_PLOTTER_CMD),
-    1:pane
-)"
-
-# Pre-typed, NOT executed - press Enter here once the drone is flying and the
-# gimbal is pointed down. It runs the identification itself, which EXCITES a
-# swing.
+# The filter now starts WITH the session instead of being pre-typed. It no
+# longer commands the identification itself: it subscribes to the latched
+# hook_pendulum_params_identified and blocks until something publishes it,
+# logging "Still waiting for pendulum params..." every 10s. So you will see it
+# sit idle here until you send the estimate_length_and_damping goal by hand -
+# that wait IS the expected behaviour, not a hang.
 HOOK_KF_CMD="ros2 launch sway_controller hook_kalman_filter_node_launch.py \
 robot_name:=$ROBOT_NAME \
 use_sim_time:=$USE_SIM_TIME \
 camera_calibration_file:=$CAM_CALIBRATION_FILE"
 
+tmux_make_layout "$SESSION" Hook "
+col(
+    1:var(ESTIMATE_LENGTH_AND_DAMPING_CMD),
+    1:var(HOOK_KF_CMD),
+    1:var(HOOK_GT_COMPARATOR_CMD),
+    1:var(SWAY_PLOTTER_CMD),
+    1:pane
+)"
 
-# All panes exist by now; give their shells a moment to finish drawing prompts,
-# then type (but do not run) the commands you drive the test with by hand.
+# Pre-typed in the free pane: press Enter once the drone is flying and the
+# gimbal is pointed down. This is what unblocks the filter above.
+IDENTIFY_CMD="ros2 action send_goal /$ROBOT_NAME/estimate_length_and_damping smarc_msgs/action/BaseAction '{goal: {data: \"{}\"}}' --feedback"
+
+
 sleep 2
 preload_pane "$SESSION:MoveTo.{bottom-right}"  "$LATLON_CMD"
 preload_pane "$SESSION:Gimbal.{bottom-right}"  "$GIMBAL_DOWN_CMD"
